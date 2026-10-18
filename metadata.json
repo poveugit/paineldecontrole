@@ -1,0 +1,8 @@
+{
+  "name": "OmniPrice AI - Dashboard de Precificação \u0026 Inteligência Financeira",
+  "description": "Dashboard executivo avançado de precificação, auditoria com IA, análise de concorrência, canais de delivery e viabilidade financeira multiusuário.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
