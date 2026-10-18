@@ -45,6 +45,19 @@ import { CatalogStudioScreen } from './components/CatalogStudioScreen';
 import { ConsolidatedProfitabilityWidget } from './components/ConsolidatedProfitabilityWidget';
 import { QuickNavDrawer } from './components/QuickNavDrawer';
 import { WidgetFocusModal } from './components/WidgetFocusModal';
+import { DatabaseStatusModal } from './components/DatabaseStatusModal';
+import {
+  testFirestoreConnection,
+  dbSeedIfEmpty,
+  dbSubscribeProducts,
+  dbSaveProduct,
+  dbDeleteProduct,
+  dbSaveProductsBatch,
+  dbSaveChannels,
+  dbSaveFixedExpenses,
+  dbSaveCompetitors,
+} from './lib/firebase';
+import firebaseConfig from '../firebase-applet-config.json';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   DEFAULT_PRODUCT,
@@ -198,6 +211,45 @@ export default function App() {
   const [isFeeManagerOpen, setIsFeeManagerOpen] = useState(false);
   const [isAlertSettingsOpen, setIsAlertSettingsOpen] = useState(false);
 
+  // Database Connection State (Google Cloud Firestore)
+  const [isDbConnected, setIsDbConnected] = useState<boolean>(false);
+  const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
+  const [isDbStatusModalOpen, setIsDbStatusModalOpen] = useState<boolean>(false);
+
+  // Firebase Firestore Live Connection, Seed and Subscription
+  useEffect(() => {
+    let unsubscribeProducts: (() => void) | undefined;
+
+    const setupDatabase = async () => {
+      try {
+        const testRes = await testFirestoreConnection();
+        setIsDbConnected(testRes.connected);
+        if (testRes.connected) {
+          setLastSyncTime(new Date());
+
+          // Seed database if empty with initial catalog
+          await dbSeedIfEmpty(products, channels, fixedExpenses, competitors);
+
+          // Real-time listener for products from Cloud Firestore
+          unsubscribeProducts = dbSubscribeProducts((remoteProds) => {
+            if (remoteProds && remoteProds.length > 0) {
+              setProducts(remoteProds.map((p) => normalizeProduct(p)));
+              setLastSyncTime(new Date());
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('Firebase initialization check:', err);
+      }
+    };
+
+    setupDatabase();
+
+    return () => {
+      if (unsubscribeProducts) unsubscribeProducts();
+    };
+  }, []);
+
   // Save to LocalStorage
   useEffect(() => {
     localStorage.setItem('omniprice_layout_grid_mode', JSON.stringify(layoutGridMode));
@@ -327,6 +379,7 @@ export default function App() {
     const updated = { ...selectedProduct, cost: newCost };
     setSelectedProduct(updated);
     setProducts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    dbSaveProduct(updated).then(() => setLastSyncTime(new Date())).catch(console.error);
   };
 
   // Price apply
@@ -338,12 +391,13 @@ export default function App() {
     const updated = { ...selectedProduct, currentPrice: price };
     setSelectedProduct(updated);
     setProducts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    dbSaveProduct(updated).then(() => setLastSyncTime(new Date())).catch(console.error);
 
     setNotifications((prev) => [
       {
         id: 'notif-' + Date.now(),
         title: 'Preço Blindado Aplicado',
-        message: `Novo preço de ${formatBRL(price)} adotado para ${selectedProduct.name}. Margem real protegida contra taxas.`,
+        message: `Novo preço de ${formatBRL(price)} adotado para ${selectedProduct.name}. Margem real protegida contra taxas e gravada no banco de dados.`,
         type: 'success',
         timestamp: 'Agora',
         read: false,
@@ -360,11 +414,12 @@ export default function App() {
       return;
     }
     setChannels(updatedChannels);
+    dbSaveChannels(updatedChannels).then(() => setLastSyncTime(new Date())).catch(console.error);
     setNotifications((prev) => [
       {
         id: 'notif-' + Date.now(),
-        title: 'Taxas Globais Atualizadas',
-        message: 'O Gestor Geral atualizou a tabela de taxas dos aplicativos e maquininhas. Toda a matriz foi recalculada.',
+        title: 'Taxas Globais Atualizadas no Banco',
+        message: 'O Gestor Geral atualizou a tabela de taxas dos aplicativos e maquininhas. Toda a matriz foi recalculada e sincronizada no Firestore.',
         type: 'success',
         timestamp: 'Agora',
         read: false,
@@ -451,6 +506,7 @@ export default function App() {
     });
     setProducts((prev) => [...prev, item]);
     setSelectedProduct(item);
+    dbSaveProduct(item).then(() => setLastSyncTime(new Date())).catch(console.error);
     return item;
   };
 
@@ -461,6 +517,7 @@ export default function App() {
     if (selectedProduct.id === norm.id) {
       setSelectedProduct(norm);
     }
+    dbSaveProduct(norm).then(() => setLastSyncTime(new Date())).catch(console.error);
   };
 
   // Delete product
@@ -470,6 +527,36 @@ export default function App() {
       const remaining = products.filter((p) => p.id !== id);
       setSelectedProduct(remaining[0] || normalizeProduct(DEFAULT_PRODUCT));
     }
+    dbDeleteProduct(id).then(() => setLastSyncTime(new Date())).catch(console.error);
+  };
+
+  // Cloud Firestore Sync Actions
+  const handleSyncAllToCloud = async () => {
+    await dbSaveProductsBatch(products);
+    await dbSaveChannels(channels);
+    await dbSaveFixedExpenses(fixedExpenses);
+    await dbSaveCompetitors(competitors);
+    setLastSyncTime(new Date());
+    setIsDbConnected(true);
+  };
+
+  const handleReloadFromCloud = async () => {
+    const testRes = await testFirestoreConnection();
+    setIsDbConnected(testRes.connected);
+    setLastSyncTime(new Date());
+  };
+
+  const handleSeedDefaultData = async () => {
+    await dbSaveProductsBatch(INITIAL_PRODUCTS);
+    await dbSaveChannels(INITIAL_CHANNELS);
+    await dbSaveFixedExpenses(INITIAL_FIXED_EXPENSES);
+    await dbSaveCompetitors(INITIAL_COMPETITORS);
+    setProducts(INITIAL_PRODUCTS.map(normalizeProduct));
+    setSelectedProduct(normalizeProduct(DEFAULT_PRODUCT));
+    setChannels(INITIAL_CHANNELS);
+    setFixedExpenses(INITIAL_FIXED_EXPENSES);
+    setCompetitors(INITIAL_COMPETITORS);
+    setLastSyncTime(new Date());
   };
 
   // Export CSV
@@ -743,6 +830,8 @@ export default function App() {
         }}
         onScrollToWidget={handleScrollToWidget}
         focusedWidgetId={focusedWidgetId}
+        onOpenDatabaseStatus={() => setIsDbStatusModalOpen(true)}
+        isDbConnected={isDbConnected}
       />
 
       {/* Main Container - Full Fluid Width across all devices with Animated Tab Transitions */}
@@ -1007,6 +1096,20 @@ export default function App() {
         config={alertConfig}
         onSaveConfig={setAlertConfig}
         onTriggerTestPush={handleTriggerTestPush}
+      />
+
+      <DatabaseStatusModal
+        isOpen={isDbStatusModalOpen}
+        onClose={() => setIsDbStatusModalOpen(false)}
+        isConnected={isDbConnected}
+        projectId={firebaseConfig.projectId}
+        databaseId={firebaseConfig.firestoreDatabaseId}
+        lastSyncTime={lastSyncTime}
+        totalProducts={products.length}
+        totalChannels={channels.length}
+        onSyncAllToCloud={handleSyncAllToCloud}
+        onReloadFromCloud={handleReloadFromCloud}
+        onSeedDefaultData={handleSeedDefaultData}
       />
 
       {/* Retractable Quick Navigation Drawer */}

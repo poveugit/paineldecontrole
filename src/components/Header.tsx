@@ -31,6 +31,7 @@ import {
   ArrowDownRight,
   ChevronRight,
   ArrowLeft,
+  Database,
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { UserProfile, DepartmentKey, PushAlert, UserRole, WidgetItem } from '../types/pricing';
@@ -63,6 +64,8 @@ interface HeaderProps {
   onFocusWidget?: (widgetId: string) => void;
   onScrollToWidget?: (widgetId: string) => void;
   focusedWidgetId?: string | null;
+  onOpenDatabaseStatus?: () => void;
+  isDbConnected?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -92,6 +95,8 @@ export const Header: React.FC<HeaderProps> = ({
   onFocusWidget,
   onScrollToWidget,
   focusedWidgetId,
+  onOpenDatabaseStatus,
+  isDbConnected = false,
 }) => {
   const [showUserDropdown, setShowUserDropdown] = useState(false);
   const [showNotifDropdown, setShowNotifDropdown] = useState(false);
@@ -366,6 +371,33 @@ export const Header: React.FC<HeaderProps> = ({
                 <SlidersHorizontal className="w-3.5 h-3.5" />
               </button>
             </div>
+
+            {/* Database Cloud Sync Button */}
+            {onOpenDatabaseStatus && (
+              <button
+                onClick={onOpenDatabaseStatus}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-950/80 hover:bg-slate-800 border border-slate-800 transition-all text-xs shrink-0 group"
+                title={
+                  isDbConnected
+                    ? 'Banco em Nuvem: Cloud Firestore Conectado (Clique para gerenciar)'
+                    : 'Conectando ao Firestore...'
+                }
+              >
+                <Database
+                  className={`w-3.5 h-3.5 shrink-0 ${
+                    isDbConnected ? 'text-emerald-400 group-hover:scale-110 transition-transform' : 'text-amber-400'
+                  }`}
+                />
+                <span className="hidden md:inline text-[11px] font-bold text-slate-300">
+                  {isDbConnected ? 'Banco Ativo' : 'Conectando'}
+                </span>
+                <span
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    isDbConnected ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50 animate-pulse' : 'bg-amber-400'
+                  }`}
+                />
+              </button>
+            )}
 
             {/* Notifications Bell Dropdown */}
             <div className="relative shrink-0">

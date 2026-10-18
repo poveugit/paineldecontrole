@@ -1,0 +1,88 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Product catalog item with pricing, CMV, stocks, and recipe ingredients",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "cost": { "type": "number" },
+        "currentPrice": { "type": "number" },
+        "targetNetMargin": { "type": "number" },
+        "estimatedMonthlyUnits": { "type": "number" },
+        "description": { "type": "string" },
+        "isCustom": { "type": "boolean" },
+        "active": { "type": "boolean" },
+        "sku": { "type": "string" },
+        "unit": { "type": "string" },
+        "currentStock": { "type": "number" },
+        "minStock": { "type": "number" },
+        "maxStock": { "type": "number" },
+        "costMethod": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "category", "cost", "currentPrice"]
+    },
+    "ChannelFee": {
+      "title": "ChannelFee",
+      "description": "Marketplace and sales channel commission and fee rates",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "platform": { "type": "string" },
+        "platformName": { "type": "string" },
+        "name": { "type": "string" },
+        "totalRate": { "type": "number" },
+        "highlight": { "type": "boolean" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "platform", "platformName", "name", "totalRate"]
+    },
+    "Competitor": {
+      "title": "Competitor",
+      "description": "Monitored competitors in the radar widget",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "platform": { "type": "string" },
+        "price": { "type": "number" },
+        "distanceKm": { "type": "number" },
+        "threatLevel": { "type": "string" }
+      },
+      "required": ["id", "name", "platform", "price"]
+    },
+    "Setting": {
+      "title": "Setting",
+      "description": "System settings such as fixed expenses and alert configuration",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string" },
+        "data": { "type": "object" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "type"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Collection of all priced products in the catalog"
+    },
+    "/channels/{channelId}": {
+      "schema": "ChannelFee",
+      "description": "Collection of commercial channel fee structures"
+    },
+    "/competitors/{competitorId}": {
+      "schema": "Competitor",
+      "description": "Collection of benchmarked competitor prices"
+    },
+    "/settings/{settingId}": {
+      "schema": "Setting",
+      "description": "Store configuration and operational fixed expenses"
+    }
+  }
+}

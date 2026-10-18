@@ -1,0 +1,43 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Healthcheck / Connection test document
+    match /test/{docId} {
+      allow read, write: if true;
+    }
+
+    // Products collection (allow list & get queries, write guarded per document ID)
+    match /products/{productId} {
+      allow read: if true;
+      allow create, update, delete: if isValidId(productId);
+    }
+
+    // Channel fees collection
+    match /channels/{channelId} {
+      allow read: if true;
+      allow create, update, delete: if isValidId(channelId);
+    }
+
+    // Competitors radar collection
+    match /competitors/{competitorId} {
+      allow read: if true;
+      allow create, update, delete: if isValidId(competitorId);
+    }
+
+    // Settings collection (Fixed expenses, alerts, etc.)
+    match /settings/{settingId} {
+      allow read: if true;
+      allow create, update, delete: if isValidId(settingId);
+    }
+  }
+}
