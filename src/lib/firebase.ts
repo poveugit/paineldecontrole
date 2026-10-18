@@ -12,8 +12,21 @@ import {
   Firestore,
 } from 'firebase/firestore';
 import { getAuth, signInAnonymously, onAuthStateChanged, User, Auth } from 'firebase/auth';
-import firebaseConfig from '../../firebase-applet-config.json';
+import defaultFirebaseConfig from '../../firebase-applet-config.json';
 import { ProductItem, ChannelFee, FixedExpenses, CompetitorItem } from '../types/pricing';
+
+// Configuration supporting both runtime Vercel environment variables and local json file
+export const firebaseConfig = {
+  projectId: import.meta.env?.VITE_FIREBASE_PROJECT_ID || defaultFirebaseConfig.projectId,
+  appId: import.meta.env?.VITE_FIREBASE_APP_ID || defaultFirebaseConfig.appId,
+  apiKey: import.meta.env?.VITE_FIREBASE_API_KEY || defaultFirebaseConfig.apiKey,
+  authDomain: import.meta.env?.VITE_FIREBASE_AUTH_DOMAIN || defaultFirebaseConfig.authDomain,
+  firestoreDatabaseId:
+    import.meta.env?.VITE_FIREBASE_FIRESTORE_DATABASE_ID || defaultFirebaseConfig.firestoreDatabaseId,
+  storageBucket: import.meta.env?.VITE_FIREBASE_STORAGE_BUCKET || defaultFirebaseConfig.storageBucket,
+  messagingSenderId:
+    import.meta.env?.VITE_FIREBASE_MESSAGING_SENDER_ID || defaultFirebaseConfig.messagingSenderId,
+};
 
 // Initialize Firebase App
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
