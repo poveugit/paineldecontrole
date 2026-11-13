@@ -1,6 +1,6 @@
 import express from 'express';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 
 dotenv.config();
 
@@ -11,7 +11,6 @@ app.use(express.json({ limit: '10mb' }));
 // Prevent Express from returning HTML error pages when receiving invalid JSON
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (err instanceof SyntaxError && 'body' in err) {
-    console.warn('JSON parsing error in request body:', err.message);
     return res.status(400).json({
       success: false,
       error: 'Invalid JSON payload received in request',
@@ -33,6 +32,36 @@ if (apiKey) {
       },
     },
   });
+}
+
+// Track temporary unavailability (e.g. billing / free-tier disabled on project) to avoid repeated failed calls
+let geminiBlockedUntil = 0;
+let lastGeminiNotice: string | null = null;
+
+function handleGeminiFallbackReason(error: unknown): string {
+  const msg = error instanceof Error ? error.message : String(error || '');
+  if (
+    msg.includes('403') ||
+    msg.includes('PERMISSION_DENIED') ||
+    msg.includes('free tier is not available') ||
+    msg.includes('billing')
+  ) {
+    geminiBlockedUntil = Date.now() + 5 * 60 * 1000;
+    lastGeminiNotice = 'Gemini API requer faturamento ativo neste projeto (verifique Settings > Secrets). Operando com motor heurístico local.';
+    return lastGeminiNotice;
+  }
+  if (msg.includes('400') || msg.includes('API_KEY_INVALID')) {
+    geminiBlockedUntil = Date.now() + 5 * 60 * 1000;
+    lastGeminiNotice = 'Chave da Gemini API inválida ou não configurada em Settings > Secrets. Operando com motor heurístico local.';
+    return lastGeminiNotice;
+  }
+  if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
+    geminiBlockedUntil = Date.now() + 60 * 1000;
+    lastGeminiNotice = 'Limite de requisições da Gemini API atingido temporariamente. Operando com motor heurístico local.';
+    return lastGeminiNotice;
+  }
+  lastGeminiNotice = 'Motor heurístico local utilizado para manter resposta instantânea.';
+  return lastGeminiNotice;
 }
 
 // Resilient JSON parser for model outputs
@@ -69,10 +98,13 @@ app.post('/api/ai/pricing-audit', async (req, res) => {
 
   const fallback = generateFallbackAudit(product, channels, fixedCosts);
 
-  if (!ai) {
+  if (!ai || Date.now() < geminiBlockedUntil) {
     return res.json({
       success: true,
       source: 'local_fallback',
+      apiNotice: !ai
+        ? 'Chave GEMINI_API_KEY não configurada em Settings > Secrets. Operando com motor heurístico local.'
+        : lastGeminiNotice,
       analysis: fallback,
     });
   }
@@ -99,7 +131,7 @@ INSTRUÇÕES OBRIGATÓRIAS:
 3. Aponte os 3 maiores gargalos financeiros (ex: venda no crédito/online no Uai Rango com 17.49% de taxa reduzindo lucro a centavos).
 4. Sugira a fórmula de Precificação Blindada com Margem Líquida Real Garantida: Preço = Custo / (1 - MargemLíquidaDesejada - TaxaCanal).
 5. Dê recomendações práticas para Uai Rango, Tchau Fome, iFood e Balcão.
-Responda em formato JSON válido contendo exatamente as chaves:
+Responda em formato JSON válido e conciso contendo exatamente as chaves:
 {
   "status": "crítico" | "atenção" | "saudável",
   "score": number,
@@ -118,12 +150,11 @@ Responda em formato JSON válido contendo exatamente as chaves:
 }`;
 
     const geminiCall = ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-4-hydrogen',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
-        maxOutputTokens: 2500,
-        thinkingConfig: { thinkingBudget: 0 },
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
 
@@ -139,11 +170,12 @@ Responda em formato JSON válido contendo exatamente as chaves:
       source: 'gemini',
       analysis: parsed || fallback,
     });
-  } catch (error: any) {
-    console.warn('API /api/ai/pricing-audit used fallback:', error?.message);
+  } catch (error: unknown) {
+    const notice = handleGeminiFallbackReason(error);
     return res.json({
       success: true,
       source: 'heuristic',
+      apiNotice: notice,
       analysis: fallback,
     });
   }
@@ -151,16 +183,21 @@ Responda em formato JSON válido contendo exatamente as chaves:
 
 // 2. AI Market Simulation & Competitor Benchmarking
 app.post('/api/ai/market-simulations', async (req, res) => {
-  try {
-    const { product, competitors, selectedChannel } = req.body;
+  const body = req.body || {};
+  const { product, competitors, selectedChannel } = body;
 
-    if (!ai) {
-      return res.json({
-        success: true,
-        source: 'local_fallback',
-        simulation: generateFallbackSimulation(product, competitors, selectedChannel),
-      });
-    }
+  if (!ai || Date.now() < geminiBlockedUntil) {
+    return res.json({
+      success: true,
+      source: 'local_fallback',
+      apiNotice: !ai
+        ? 'Chave GEMINI_API_KEY não configurada em Settings > Secrets. Operando com motor heurístico local.'
+        : lastGeminiNotice,
+      simulation: generateFallbackSimulation(product, competitors, selectedChannel),
+    });
+  }
+
+  try {
 
     const prompt = `Você é um Estrategista de Pricing Competitivo em Food Service.
 Avalie o produto "${product?.name || 'Produto Principal'}" com Custo CMV de R$ ${Number(product?.cost || 6.89).toFixed(2)}.
@@ -213,10 +250,11 @@ Retorne em formato JSON válido:
 }`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-4-hydrogen',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -257,28 +295,34 @@ Retorne em formato JSON válido:
       source: 'gemini',
       simulation: parsed,
     });
-  } catch (error: any) {
-    console.error('Error in /api/ai/market-simulations:', error);
+  } catch (error: unknown) {
+    const notice = handleGeminiFallbackReason(error);
     return res.json({
       success: true,
       source: 'heuristic',
-      simulation: generateFallbackSimulation(req.body.product, req.body.competitors, req.body.selectedChannel),
+      apiNotice: notice,
+      simulation: generateFallbackSimulation(product, competitors, selectedChannel),
     });
   }
 });
 
 // 3. AI Executive Financial Viability Report
 app.post('/api/ai/executive-report', async (req, res) => {
-  try {
-    const { products, channels, fixedExpenses } = req.body;
+  const body = req.body || {};
+  const { products, channels, fixedExpenses } = body;
 
-    if (!ai) {
-      return res.json({
-        success: true,
-        source: 'local_fallback',
-        report: generateFallbackReport(products, channels),
-      });
-    }
+  if (!ai || Date.now() < geminiBlockedUntil) {
+    return res.json({
+      success: true,
+      source: 'local_fallback',
+      apiNotice: !ai
+        ? 'Chave GEMINI_API_KEY não configurada em Settings > Secrets. Operando com motor heurístico local.'
+        : lastGeminiNotice,
+      report: generateFallbackReport(products, channels),
+    });
+  }
+
+  try {
 
     const prompt = `Gere um Parecer Executivo de Viabilidade Financeira e Governança de Preços para a Diretoria.
 Produtos cadastrados:
@@ -305,10 +349,11 @@ Retorne um relatório executivo JSON estruturado:
 }`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-4-hydrogen',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -357,27 +402,35 @@ Retorne um relatório executivo JSON estruturado:
       source: 'gemini',
       report: parsed,
     });
-  } catch (error: any) {
-    console.error('Error in /api/ai/executive-report:', error);
+  } catch (error: unknown) {
+    const notice = handleGeminiFallbackReason(error);
     return res.json({
       success: true,
       source: 'heuristic',
-      report: generateFallbackReport(req.body.products, req.body.channels),
+      apiNotice: notice,
+      report: generateFallbackReport(products, channels),
     });
   }
 });
 
 // Fallback audit generator
-function generateFallbackAudit(product: any, channels: any[], fixedCosts: any) {
+function generateFallbackAudit(product: any, _channels: any[], _fixedCosts: any) {
   const cost = Number(product?.cost || 6.89);
+  const spreadsheetPrice20 = cost / 0.8;
+  const uaiFeeRate = 0.1749;
+  const uaiFeeAmount = spreadsheetPrice20 * uaiFeeRate;
+  const uaiNetProfit = spreadsheetPrice20 - cost - uaiFeeAmount;
+  const uaiNetMarginPct = spreadsheetPrice20 > 0 ? (uaiNetProfit / spreadsheetPrice20) * 100 : 0;
+  const shieldedPrice20 = cost / (1 - 0.20 - uaiFeeRate);
+
   return {
     status: 'atenção',
     score: 64,
     headline: 'Efeito Ilusão de Margem Detectado: Taxas de Delivery consomem até 85% do lucro esperado',
-    verdict: `Ao aplicar a fórmula tradicional da planilha [Preço = Custo / (1 - Margem)], você calculou um preço de R$ ${(cost / 0.8).toFixed(2)} esperando 20% de lucro. No entanto, no canal Uai Rango Pagamento Online (17,49% de taxa total), a taxa de R$ ${((cost / 0.8) * 0.1749).toFixed(2)} consome quase todo o excedente, sobrando apenas R$ 0,22 de lucro líquido real (2,55%).`,
+    verdict: `Ao aplicar a fórmula tradicional da planilha [Preço = Custo / (1 - Margem)], você calculou um preço de R$ ${spreadsheetPrice20.toFixed(2).replace('.', ',')} esperando 20% de lucro. No entanto, no canal Uai Rango Pagamento Online (17,49% de taxa total), a taxa de R$ ${uaiFeeAmount.toFixed(2).replace('.', ',')} consome quase todo o excedente, sobrando apenas R$ ${uaiNetProfit.toFixed(2).replace('.', ',')} de lucro líquido real (${uaiNetMarginPct.toFixed(2).replace('.', ',')}%).`,
     marginIllusionAnalysis: 'A planilha calcula a taxa percentual sobre o Preço de Venda final, mas a margem de custo foi calculada sem prever essa despesa variável. É mandatório adotar a Precificação Integrada.',
     bottlenecks: [
-      'Uai Rango Online (17,49% de taxa): Reduz margem líquida real para míseros 2,55% no preço de R$ 8,61.',
+      `Uai Rango Online (17,49% de taxa): Reduz margem líquida real para míseros ${uaiNetMarginPct.toFixed(2).replace('.', ',')}% no preço de R$ ${spreadsheetPrice20.toFixed(2).replace('.', ',')}.`,
       'Tchau Fome Crédito (12,44% de taxa): Margem líquida fica em 7,56% para margem nominal de 20%.',
       'Falta de repasse diferenciado por meio de pagamento (online vs dinheiro vs pix).'
     ],
@@ -385,9 +438,9 @@ function generateFallbackAudit(product: any, channels: any[], fixedCosts: any) {
       {
         channelName: 'Uai Rango',
         subChannel: 'Pagamento Online (17,49%)',
-        currentNetMargin: '2,55%',
+        currentNetMargin: `${uaiNetMarginPct.toFixed(2).replace('.', ',')}%`,
         warning: 'Margem crítica abaixo da taxa de retorno aceitável.',
-        suggestedAction: 'Ajustar preço no canal para no mínimo R$ 11,00 para garantir 20% líquido real.'
+        suggestedAction: `Ajustar preço no canal para no mínimo R$ ${shieldedPrice20.toFixed(2).replace('.', ',')} para garantir 20% líquido real.`
       },
       {
         channelName: 'Uai Rango',

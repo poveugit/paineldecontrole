@@ -140,14 +140,45 @@ export const dbSaveProduct = async (product: ProductItem): Promise<void> => {
   }
 };
 
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
+  const errInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid ?? null,
+      email: auth.currentUser?.email ?? null,
+      emailVerified: auth.currentUser?.emailVerified ?? null,
+      isAnonymous: auth.currentUser?.isAnonymous ?? null,
+      tenantId: auth.currentUser?.tenantId ?? null,
+      providerInfo:
+        auth.currentUser?.providerData?.map((provider) => ({
+          providerId: provider.providerId,
+          email: provider.email,
+        })) || [],
+    },
+    operationType,
+    path,
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
 // Delete a product
 export const dbDeleteProduct = async (productId: string): Promise<void> => {
+  const path = `products/${productId}`;
   try {
     await initAuth();
     await deleteDoc(doc(db, 'products', productId));
   } catch (err) {
-    console.error('[Firestore] Error deleting product:', err);
-    throw err;
+    handleFirestoreError(err, OperationType.DELETE, path);
   }
 };
 

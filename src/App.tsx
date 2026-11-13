@@ -191,6 +191,7 @@ export default function App() {
 
   // AI Audit State
   const [auditResult, setAuditResult] = useState<PricingAuditResult | null>(null);
+  const [auditNotice, setAuditNotice] = useState<string | null>(null);
   const [isAuditing, setIsAuditing] = useState(false);
 
   // Alert Trigger Configuration
@@ -325,6 +326,7 @@ export default function App() {
         const data = await res.json();
         if (data && data.success && data.analysis) {
           setAuditResult(data.analysis);
+          setAuditNotice(data.apiNotice || null);
           return;
         }
       }
@@ -332,10 +334,11 @@ export default function App() {
       // If response is not ok or not JSON, use local heuristic fallback seamlessly
       const fallbackAudit = generateLocalAuditFallback(selectedProduct, channels, fixedExpenses);
       setAuditResult(fallbackAudit);
-    } catch (err) {
-      console.warn('Network issue fetching AI audit, applied local fallback engine:', err);
+      setAuditNotice('Motor heurístico local ativado.');
+    } catch {
       const fallbackAudit = generateLocalAuditFallback(selectedProduct, channels, fixedExpenses);
       setAuditResult(fallbackAudit);
+      setAuditNotice('Motor heurístico local ativado.');
     } finally {
       setIsAuditing(false);
     }
@@ -522,12 +525,78 @@ export default function App() {
 
   // Delete product
   const handleDeleteProduct = (id: string) => {
-    setProducts((prev) => prev.filter((p) => p.id !== id));
+    const deletedProd = products.find((p) => p.id === id);
+    const remaining = products.filter((p) => p.id !== id);
+    setProducts(remaining);
     if (selectedProduct.id === id) {
-      const remaining = products.filter((p) => p.id !== id);
       setSelectedProduct(remaining[0] || normalizeProduct(DEFAULT_PRODUCT));
     }
     dbDeleteProduct(id).then(() => setLastSyncTime(new Date())).catch(console.error);
+
+    if (deletedProd) {
+      setNotifications((prev) => [
+        {
+          id: 'notif-' + Date.now(),
+          title: 'Produto Excluído do Catálogo',
+          message: `${deletedProd.name} foi removido do catálogo e sincronizado com o banco de dados.`,
+          type: 'warning',
+          timestamp: 'Agora',
+          read: false,
+          source: 'system',
+        },
+        ...prev,
+      ]);
+    }
+  };
+
+  // Batch Import Products from Spreadsheet
+  const handleBatchImportProducts = (importedProducts: ProductItem[], mode: 'merge' | 'replace') => {
+    let finalProducts: ProductItem[] = [];
+    if (mode === 'replace') {
+      finalProducts = importedProducts;
+    } else {
+      const existingMap = new Map<string, ProductItem>();
+      products.forEach((p) => {
+        if (p.sku) existingMap.set(p.sku.toLowerCase().trim(), p);
+        existingMap.set(p.name.toLowerCase().trim(), p);
+      });
+
+      const mergedList = [...products];
+      for (const item of importedProducts) {
+        const keySku = item.sku ? item.sku.toLowerCase().trim() : null;
+        const keyName = item.name.toLowerCase().trim();
+        const existing = (keySku && existingMap.get(keySku)) || existingMap.get(keyName);
+
+        if (existing) {
+          const idx = mergedList.findIndex((p) => p.id === existing.id);
+          if (idx !== -1) {
+            mergedList[idx] = { ...existing, ...item, id: existing.id };
+          }
+        } else {
+          mergedList.push(item);
+        }
+      }
+      finalProducts = mergedList;
+    }
+
+    setProducts(finalProducts);
+    if (finalProducts.length > 0) {
+      setSelectedProduct(finalProducts[0]);
+    }
+    dbSaveProductsBatch(finalProducts).then(() => setLastSyncTime(new Date())).catch(console.error);
+
+    setNotifications((prev) => [
+      {
+        id: 'notif-' + Date.now(),
+        title: 'Planilha Importada',
+        message: `${importedProducts.length} itens foram processados e sincronizados no catálogo via planilha.`,
+        type: 'success',
+        timestamp: 'Agora',
+        read: false,
+        source: 'market',
+      },
+      ...prev,
+    ]);
   };
 
   // Cloud Firestore Sync Actions
@@ -659,6 +728,7 @@ export default function App() {
         return (
           <AIAuditorWidget
             auditResult={auditResult}
+            auditNotice={auditNotice}
             isLoading={isAuditing}
             onRefreshAudit={triggerAIAudit}
             product={selectedProduct}
@@ -855,6 +925,7 @@ export default function App() {
                 onUpdateProduct={handleUpdateProduct}
                 onAddProduct={handleAddProduct}
                 onDeleteProduct={handleDeleteProduct}
+                onBatchImportProducts={handleBatchImportProducts}
                 onBackToDashboard={() => {
                   setActiveScreen('dashboard');
                   window.scrollTo({ top: 0, behavior: 'smooth' });

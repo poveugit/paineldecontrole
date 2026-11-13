@@ -16,6 +16,7 @@ import { formatBRL } from '../utils/pricingEngine';
 
 interface AIAuditorWidgetProps {
   auditResult: PricingAuditResult | null;
+  auditNotice?: string | null;
   isLoading: boolean;
   onRefreshAudit: () => void;
   product: ProductItem;
@@ -25,6 +26,7 @@ interface AIAuditorWidgetProps {
 
 export const AIAuditorWidget: React.FC<AIAuditorWidgetProps> = ({
   auditResult,
+  auditNotice,
   isLoading,
   onRefreshAudit,
   product,
@@ -136,6 +138,13 @@ export const AIAuditorWidget: React.FC<AIAuditorWidgetProps> = ({
           </button>
         </div>
       </div>
+
+      {auditNotice && (
+        <div className="mt-3 px-3.5 py-2 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center gap-2 text-[11px] text-amber-200">
+          <Info className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          <span>{auditNotice}</span>
+        </div>
+      )}
 
       {/* Main Verdict & Margin Illusion Box */}
       <div className="mt-4 p-4 rounded-2xl bg-slate-950/80 border border-slate-800/80 space-y-3">

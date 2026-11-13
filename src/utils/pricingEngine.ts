@@ -3,6 +3,7 @@ import {
   PricingMatrixRow,
   ProductItem,
   ProductIngredient,
+  StockMovement,
   CompetitorItem,
   FixedExpenses,
   UserProfile,
@@ -758,8 +759,15 @@ export function calculateIngredientsCMV(ingredients: ProductIngredient[]): numbe
  * Garante que qualquer produto possua estrutura completa de ficha técnica e estoque
  */
 export function normalizeProduct(product: ProductItem): ProductItem {
-  const currentCost = Number(product.cost) || 6.89;
-  const ingredients = product.ingredients && product.ingredients.length > 0
+  const hasExplicitCost =
+    product.cost !== undefined &&
+    product.cost !== null &&
+    !Number.isNaN(Number(product.cost));
+  const currentCost = hasExplicitCost ? Number(product.cost) : 6.89;
+
+  // Preservar array vazio [] quando o usuário exclui todos os insumos da ficha técnica;
+  // gerar insumos iniciais apenas quando o campo estiver ausente (undefined).
+  const ingredients: ProductIngredient[] = Array.isArray(product.ingredients)
     ? product.ingredients
     : [
         {
@@ -791,8 +799,24 @@ export function normalizeProduct(product: ProductItem): ProductItem {
         },
       ];
 
+  // Preservar histórico vazio [] caso todas as movimentações tenham sido excluídas
+  const stockHistory: StockMovement[] = Array.isArray(product.stockHistory)
+    ? product.stockHistory
+    : [
+        {
+          id: `stk-${product.id}-init`,
+          date: new Date().toISOString().slice(0, 16).replace('T', ' '),
+          type: 'in',
+          quantity: product.currentStock ?? 50,
+          reason: 'Estoque inicial cadastrado',
+          previousStock: 0,
+          newStock: product.currentStock ?? 50,
+        },
+      ];
+
   return {
     ...product,
+    cost: currentCost,
     sku: product.sku || `PRD-${product.id.slice(-4).toUpperCase()}`,
     unit: product.unit || 'un',
     currentStock: product.currentStock ?? 50,
@@ -801,19 +825,7 @@ export function normalizeProduct(product: ProductItem): ProductItem {
     costMethod: product.costMethod || 'recipe',
     active: product.active ?? true,
     ingredients,
-    stockHistory: product.stockHistory && product.stockHistory.length > 0
-      ? product.stockHistory
-      : [
-          {
-            id: `stk-${product.id}-init`,
-            date: new Date().toISOString().slice(0, 16).replace('T', ' '),
-            type: 'in',
-            quantity: product.currentStock ?? 50,
-            reason: 'Estoque inicial cadastrado',
-            previousStock: 0,
-            newStock: product.currentStock ?? 50,
-          },
-        ],
+    stockHistory,
   };
 }
 

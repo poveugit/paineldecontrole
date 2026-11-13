@@ -27,9 +27,14 @@ import {
   Info,
   Scale,
   Percent,
+  UploadCloud,
+  Calculator,
 } from 'lucide-react';
 import { ProductItem, ProductIngredient, StockMovement, ChannelFee } from '../types/pricing';
 import { formatBRL, calculateIngredientsCMV, normalizeProduct } from '../utils/pricingEngine';
+import { UnitSelectorModal } from './UnitSelectorModal';
+import { SpreadsheetImportModal } from './SpreadsheetImportModal';
+import { ChannelSellingPricesModal } from './ChannelSellingPricesModal';
 
 interface CatalogStudioScreenProps {
   products: ProductItem[];
@@ -40,6 +45,7 @@ interface CatalogStudioScreenProps {
   onAddProduct: (product: Omit<ProductItem, 'id'>) => ProductItem;
   onDeleteProduct: (id: string) => void;
   onBackToDashboard: () => void;
+  onBatchImportProducts?: (products: ProductItem[], mode: 'merge' | 'replace') => void;
 }
 
 export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
@@ -51,10 +57,12 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
   onAddProduct,
   onDeleteProduct,
   onBackToDashboard,
+  onBatchImportProducts,
 }) => {
   // Navigation within Studio: 'list' (Table/Grid) or 'edit' (Dedicated Product & Technical Sheet Studio)
   const [studioMode, setStudioMode] = useState<'list' | 'edit'>('list');
   const [editingProductId, setEditingProductId] = useState<string>(selectedProduct.id);
+  const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
 
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -82,12 +90,55 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
   }, [products, editingProductId, selectedProduct]);
 
   const [draftProduct, setDraftProduct] = useState<ProductItem>(currentEditingProduct);
+  const [isUnitModalOpen, setIsUnitModalOpen] = useState(false);
+  const [isSellingPricesModalOpen, setIsSellingPricesModalOpen] = useState(false);
+  const [referenceChannelId, setReferenceChannelId] = useState<string>('direct-zero');
+  const [productToDelete, setProductToDelete] = useState<ProductItem | null>(null);
+
+  const computeChannelSellingPrice = (
+    costVal: number,
+    marginDecimal: number,
+    feeRatePercent: number
+  ): { feasible: boolean; sellingPrice: number; feeAmount: number; netProfit: number } => {
+    const safeCost = Math.max(0, Number(costVal) || 0);
+    const safeMargin = Math.max(0, Math.min(0.9, Number(marginDecimal) || 0));
+    const feeRate = (Number(feeRatePercent) || 0) / 100;
+    const denominator = 1 - safeMargin - feeRate;
+    if (denominator <= 0.02 || safeCost <= 0) {
+      return { feasible: denominator > 0.02, sellingPrice: 0, feeAmount: 0, netProfit: 0 };
+    }
+    const sellingPrice = Number((safeCost / denominator).toFixed(2));
+    const feeAmount = Number((sellingPrice * feeRate).toFixed(2));
+    const netProfit = Number((sellingPrice - safeCost - feeAmount).toFixed(2));
+    return { feasible: true, sellingPrice, feeAmount, netProfit };
+  };
+
+  const getReferenceFeeRate = (channelId: string): number => {
+    if (channelId === 'direct-zero') return 0;
+    const found = channels.find((c) => c.id === channelId);
+    return found ? found.totalRate : 0;
+  };
+
+  const channelSellingPreviews = useMemo(() => {
+    return channels.map((channel) => {
+      const calc = computeChannelSellingPrice(
+        draftProduct.cost,
+        draftProduct.targetNetMargin,
+        channel.totalRate
+      );
+      return {
+        channel,
+        ...calc,
+      };
+    });
+  }, [channels, draftProduct.cost, draftProduct.targetNetMargin]);
 
   // Sync draft when editingProductId changes
   const handleStartEditing = (prod: ProductItem) => {
     const normalized = normalizeProduct(prod);
     setEditingProductId(prod.id);
     setDraftProduct(normalized);
+    setReferenceChannelId('direct-zero');
     setStudioMode('edit');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -98,21 +149,18 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
       sku: `PRD-${Math.floor(100 + Math.random() * 900)}`,
       name: 'Novo Prato / Produto do Cardápio',
       category: categories[0] || 'Lanches',
-      cost: 5.0,
-      currentPrice: 15.0,
+      cost: 0,
+      currentPrice: 0,
       targetNetMargin: 0.25,
       estimatedMonthlyUnits: 150,
       unit: 'un',
       currentStock: 30,
       minStock: 10,
       maxStock: 100,
-      costMethod: 'recipe',
+      costMethod: 'manual',
       description: 'Descrição do novo item do cardápio.',
       active: true,
-      ingredients: [
-        { id: `ing-${Date.now()}-1`, name: 'Insumo Base Principal', quantity: 1, unit: 'un', unitCost: 3.5, wastePercent: 0, subtotal: 3.5 },
-        { id: `ing-${Date.now()}-2`, name: 'Embalagem / Acessório', quantity: 1, unit: 'un', unitCost: 1.5, wastePercent: 0, subtotal: 1.5 },
-      ],
+      ingredients: [],
       stockHistory: [
         {
           id: `stk-${Date.now()}`,
@@ -295,6 +343,72 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     }
   };
 
+  // Stock Movement Edit State & Handlers
+  const [editingMovementId, setEditingMovementId] = useState<string | null>(null);
+  const [editMovDate, setEditMovDate] = useState<string>('');
+  const [editMovReason, setEditMovReason] = useState<string>('');
+  const [editMovQty, setEditMovQty] = useState<string>('');
+  const [editMovType, setEditMovType] = useState<'in' | 'out' | 'adjust'>('in');
+
+  const handleStartEditMovement = (mov: StockMovement) => {
+    setEditingMovementId(mov.id);
+    setEditMovDate(mov.date);
+    setEditMovReason(mov.reason);
+    setEditMovQty(mov.quantity.toString());
+    setEditMovType(mov.type);
+  };
+
+  const handleCancelEditMovement = () => {
+    setEditingMovementId(null);
+  };
+
+  const handleSaveEditMovement = (movementId: string) => {
+    const qty = parseFloat(editMovQty);
+    if (isNaN(qty) || qty <= 0) return;
+
+    const oldMov = (draftProduct.stockHistory || []).find((m) => m.id === movementId);
+    if (!oldMov) return;
+
+    const updatedHistory = (draftProduct.stockHistory || []).map((m) => {
+      if (m.id === movementId) {
+        return {
+          ...m,
+          date: editMovDate || m.date,
+          reason: editMovReason || m.reason,
+          type: editMovType,
+          quantity: qty,
+        };
+      }
+      return m;
+    });
+
+    const updated = {
+      ...draftProduct,
+      stockHistory: updatedHistory,
+    };
+
+    setDraftProduct(updated);
+    onUpdateProduct(updated);
+    if (selectedProduct.id === updated.id) {
+      onSelectProduct(updated);
+    }
+    setEditingMovementId(null);
+  };
+
+  const handleDeleteMovement = (movementId: string) => {
+    const updatedHistory = (draftProduct.stockHistory || []).filter((m) => m.id !== movementId);
+    const updated = {
+      ...draftProduct,
+      stockHistory: updatedHistory,
+    };
+
+    setDraftProduct(updated);
+    onUpdateProduct(updated);
+    if (selectedProduct.id === updated.id) {
+      onSelectProduct(updated);
+    }
+  };
+
   // Save changes to draft product
   const handleSaveDraftProduct = () => {
     onUpdateProduct(draftProduct);
@@ -402,15 +516,26 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
             {studioMode === 'edit' ? (
               <>
                 <button
+                  type="button"
                   onClick={() => setStudioMode('list')}
-                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-all flex items-center gap-1.5"
+                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-all flex items-center gap-1.5 cursor-pointer"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />
                   Voltar ao Catálogo
                 </button>
                 <button
+                  type="button"
+                  onClick={() => setProductToDelete(draftProduct)}
+                  className="px-3.5 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-rose-200 text-xs font-semibold border border-rose-500/30 transition-all flex items-center gap-1.5 cursor-pointer"
+                  title="Excluir este produto permanentemente do catálogo"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Excluir Produto
+                </button>
+                <button
+                  type="button"
                   onClick={handleSaveDraftProduct}
-                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all flex items-center gap-1.5"
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all flex items-center gap-1.5 cursor-pointer"
                 >
                   <Check className="w-4 h-4" />
                   Salvar Alterações
@@ -435,6 +560,15 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                 >
                   <Layers className="w-3.5 h-3.5" />
                   Categorias ({categories.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsImportModalOpen(true)}
+                  className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold shadow-md shadow-emerald-500/20 transition-all flex items-center gap-1.5 cursor-pointer"
+                  title="Importar produtos em massa via planilha (Excel, CSV ou Colar da Planilha)"
+                >
+                  <UploadCloud className="w-3.5 h-3.5" />
+                  <span>Importar Planilha</span>
                 </button>
                 <button
                   onClick={handleExportCatalogCSV}
@@ -808,23 +942,24 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                         <td className="py-3.5 px-4 text-right font-sans">
                           <div className="flex items-center justify-end gap-1.5">
                             <button
+                              type="button"
                               onClick={() => handleStartEditing(p)}
-                              className="px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center gap-1 transition-all"
+                              className="px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer"
                               title="Abrir Estúdio Completo de Edição & Ficha Técnica"
                             >
                               <Edit3 className="w-3.5 h-3.5" />
                               <span>Editar / Ficha</span>
                             </button>
 
-                            {p.isCustom && (
-                              <button
-                                onClick={() => onDeleteProduct(p.id)}
-                                className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-all"
-                                title="Excluir produto customizado"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
+                            <button
+                              type="button"
+                              onClick={() => setProductToDelete(p)}
+                              className="px-2.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                              title="Excluir produto cadastrado"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Excluir</span>
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -917,33 +1052,97 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
               </div>
 
               <div>
-                <label className="text-[11px] text-slate-400 block mb-1 font-semibold">Unidade de Medida</label>
-                <select
-                  value={draftProduct.unit || 'un'}
-                  onChange={(e) => setDraftProduct({ ...draftProduct, unit: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white focus:outline-none focus:border-emerald-500"
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] text-slate-400 font-semibold">Unidade de Medida</label>
+                  <button
+                    type="button"
+                    onClick={() => setIsUnitModalOpen(true)}
+                    className="text-[10px] text-emerald-400 hover:text-emerald-300 font-bold hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <Scale className="w-3 h-3" />
+                    Abrir Roleta
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsUnitModalOpen(true)}
+                  className="w-full px-3 py-2 bg-slate-950 hover:bg-slate-900 border border-slate-800 hover:border-emerald-500/60 rounded-xl text-white flex items-center justify-between transition-all group cursor-pointer shadow-sm"
+                  title="Abrir seletor tipo roleta de cards para escolher ou cadastrar unidades de medida"
                 >
-                  <option value="un">Unidade (un)</option>
-                  <option value="porção">Porção</option>
-                  <option value="lata">Lata 350ml</option>
-                  <option value="garrafa">Garrafa</option>
-                  <option value="kg">Quilo (kg)</option>
-                  <option value="combo">Combo</option>
-                </select>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center font-mono font-bold text-xs uppercase">
+                      {draftProduct.unit || 'un'}
+                    </span>
+                    <span className="text-xs font-semibold text-slate-200 capitalize">
+                      {draftProduct.unit === 'un'
+                        ? 'Unidade (un)'
+                        : draftProduct.unit === 'porção'
+                        ? 'Porção'
+                        : draftProduct.unit === 'lata'
+                        ? 'Lata 350ml'
+                        : draftProduct.unit === 'garrafa'
+                        ? 'Garrafa'
+                        : draftProduct.unit === 'kg'
+                        ? 'Quilograma (kg)'
+                        : draftProduct.unit === 'g'
+                        ? 'Grama (g)'
+                        : draftProduct.unit === 'combo'
+                        ? 'Combo Completo'
+                        : draftProduct.unit === 'fatia'
+                        ? 'Fatia'
+                        : draftProduct.unit === 'ml'
+                        ? 'Mililitro (ml)'
+                        : draftProduct.unit === 'l'
+                        ? 'Litro (L)'
+                        : draftProduct.unit === 'cx'
+                        ? 'Caixa / Box'
+                        : draftProduct.unit === 'pct'
+                        ? 'Pacote'
+                        : `${draftProduct.unit}`}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-emerald-400 group-hover:translate-x-0.5 transition-transform flex items-center gap-0.5 font-bold">
+                    Roleta <ChevronRight className="w-3 h-3" />
+                  </span>
+                </button>
               </div>
 
               <div>
-                <label className="text-[11px] text-slate-400 block mb-1 font-semibold">Preço de Venda Base (R$)</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] text-slate-400 font-semibold">Preço de Custo (R$)</label>
+                  <button
+                    type="button"
+                    onClick={() => setIsSellingPricesModalOpen(true)}
+                    className="text-[10px] text-cyan-400 hover:text-cyan-300 font-bold hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <Calculator className="w-3 h-3" />
+                    Ver Preços / Taxas
+                  </button>
+                </div>
                 <div className="relative">
                   <span className="absolute left-3 top-2 text-slate-500 font-mono text-xs">R$</span>
                   <input
                     type="number"
-                    step="0.05"
-                    value={draftProduct.currentPrice}
-                    onChange={(e) =>
-                      setDraftProduct({ ...draftProduct, currentPrice: parseFloat(e.target.value) || 0 })
-                    }
-                    className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-emerald-400 font-bold font-mono focus:outline-none focus:border-emerald-500"
+                    step="0.01"
+                    min="0"
+                    value={draftProduct.cost || ''}
+                    placeholder="0,00"
+                    onChange={(e) => {
+                      const newCost = Math.max(0, parseFloat(e.target.value) || 0);
+                      const refFee = getReferenceFeeRate(referenceChannelId);
+                      const calc = computeChannelSellingPrice(
+                        newCost,
+                        draftProduct.targetNetMargin,
+                        refFee
+                      );
+                      setDraftProduct({
+                        ...draftProduct,
+                        cost: newCost,
+                        costMethod: 'manual',
+                        currentPrice: calc.feasible ? calc.sellingPrice : draftProduct.currentPrice,
+                      });
+                    }}
+                    className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-amber-300 font-bold font-mono focus:outline-none focus:border-emerald-500"
                   />
                 </div>
               </div>
@@ -952,14 +1151,24 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                 <label className="text-[11px] text-slate-400 block mb-1 font-semibold">Margem Líquida Alvo (%)</label>
                 <input
                   type="number"
-                  step="0.01"
+                  step="1"
+                  min="0"
+                  max="85"
                   value={(draftProduct.targetNetMargin * 100).toFixed(0)}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const newMargin =
+                      Math.max(0, Math.min(85, parseFloat(e.target.value) || 0)) / 100;
+                    const refFee = getReferenceFeeRate(referenceChannelId);
+                    const calc = computeChannelSellingPrice(draftProduct.cost, newMargin, refFee);
                     setDraftProduct({
                       ...draftProduct,
-                      targetNetMargin: (parseFloat(e.target.value) || 0) / 100,
-                    })
-                  }
+                      targetNetMargin: newMargin,
+                      currentPrice:
+                        draftProduct.cost > 0 && calc.feasible
+                          ? calc.sellingPrice
+                          : draftProduct.currentPrice,
+                    });
+                  }}
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white font-mono focus:outline-none focus:border-emerald-500"
                 />
               </div>
@@ -1010,6 +1219,112 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white focus:outline-none focus:border-emerald-500"
                 />
               </div>
+            </div>
+
+            {/* LIVE SELLING PRICES ACROSS ALL AVAILABLE FEES PANEL */}
+            <div className="mt-5 pt-5 border-t border-slate-800/80 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <Calculator className="w-4 h-4" />
+                      Valor de Venda a Praticar (Todas as Taxas Disponíveis)
+                    </span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-mono">
+                      Meta: {(draftProduct.targetNetMargin * 100).toFixed(0)}% líquido real
+                    </span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-950 text-slate-300 border border-slate-800 font-mono">
+                      Preço Salvo no Catálogo: <strong className="text-emerald-400">{formatBRL(draftProduct.currentPrice)}</strong>
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Cálculo automático blindado sobre o custo de <strong className="text-amber-300 font-mono">{formatBRL(draftProduct.cost)}</strong>. Clique em qualquer canal para aplicá-lo como Preço Base do catálogo ou abra o comparativo completo.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setIsSellingPricesModalOpen(true)}
+                  className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white text-xs font-bold shadow-md shadow-emerald-500/20 transition-all flex items-center gap-1.5 shrink-0 cursor-pointer"
+                >
+                  <Calculator className="w-3.5 h-3.5" />
+                  <span>Abrir Modal Completo por Taxa ({channels.length})</span>
+                </button>
+              </div>
+
+              {draftProduct.cost <= 0 ? (
+                <div className="p-4 rounded-xl bg-slate-950/70 border border-dashed border-slate-800 flex items-center gap-3 text-xs text-slate-400">
+                  <DollarSign className="w-5 h-5 text-amber-400 shrink-0" />
+                  <span>
+                    Digite o <strong className="text-amber-300">Preço de Custo (R$)</strong> acima para visualizar instantaneamente o valor de venda ideal a praticar no Uai Rango, Tchau Fome, iFood e Balcão.
+                  </span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                  {channelSellingPreviews.map(({ channel, feasible, sellingPrice, netProfit }) => {
+                    const isBaseSelected =
+                      feasible &&
+                      (referenceChannelId === channel.id ||
+                        Math.abs(draftProduct.currentPrice - sellingPrice) < 0.01);
+
+                    return (
+                      <button
+                        key={channel.id}
+                        type="button"
+                        disabled={!feasible}
+                        onClick={() => {
+                          if (!feasible) return;
+                          setReferenceChannelId(channel.id);
+                          setDraftProduct((prev) => ({ ...prev, currentPrice: sellingPrice }));
+                        }}
+                        className={`text-left p-3 rounded-xl border transition-all flex flex-col justify-between gap-1.5 ${
+                          !feasible
+                            ? 'bg-slate-950/40 border-rose-500/20 opacity-70 cursor-not-allowed'
+                            : isBaseSelected
+                            ? 'bg-emerald-500/15 border-emerald-500/60 shadow-sm cursor-pointer'
+                            : 'bg-slate-950/70 hover:bg-slate-950 border-slate-800 hover:border-emerald-500/40 cursor-pointer'
+                        }`}
+                        title={
+                          feasible
+                            ? `Clique para definir ${formatBRL(sellingPrice)} como Preço Base do produto`
+                            : 'Combinação de margem alvo + taxa do canal inviável'
+                        }
+                      >
+                        <div className="flex items-start justify-between gap-2 w-full">
+                          <div className="min-w-0">
+                            <div className="text-[11px] font-bold text-white truncate">{channel.name}</div>
+                            <div className="text-[10px] text-slate-400">
+                              Taxa: <span className="font-mono text-slate-300">{channel.totalRate.toFixed(2).replace('.', ',')}%</span>
+                            </div>
+                          </div>
+                          {isBaseSelected && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/25 text-emerald-300 text-[9px] font-bold shrink-0">
+                              Base
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-baseline justify-between gap-2 pt-1 border-t border-slate-800/70 w-full">
+                          {feasible ? (
+                            <>
+                              <span className="text-sm font-black font-mono text-emerald-400">
+                                {formatBRL(sellingPrice)}
+                              </span>
+                              <span className="text-[10px] font-mono text-cyan-300">
+                                Lucro {formatBRL(netProfit)}
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-[10px] text-rose-400 font-semibold">
+                              Margem + Taxa ≥ 98%
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
 
@@ -1129,6 +1444,14 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                       </td>
                     </tr>
                   ))}
+                  {(!draftProduct.ingredients || draftProduct.ingredients.length === 0) && (
+                    <tr>
+                      <td colSpan={7} className="py-6 px-4 text-center text-xs text-slate-400">
+                        Nenhum insumo cadastrado na ficha técnica deste produto. Clique em{' '}
+                        <strong className="text-cyan-400">Adicionar Insumo à Ficha Técnica</strong> para incluir ingredientes ou salve sem insumos.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -1296,14 +1619,118 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                   draftProduct.stockHistory.map((mov) => {
                     const isPlus = mov.type === 'in';
                     const isMinus = mov.type === 'out';
+
+                    if (editingMovementId === mov.id) {
+                      return (
+                        <div
+                          key={mov.id}
+                          className="p-3.5 rounded-xl bg-slate-950 border border-amber-500/50 space-y-3 text-xs shadow-lg ring-1 ring-amber-500/20"
+                        >
+                          <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                            <span className="text-[11px] font-bold text-amber-400 flex items-center gap-1.5">
+                              <Edit3 className="w-3.5 h-3.5" />
+                              Editar Lançamento do Histórico
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleSaveEditMovement(mov.id)}
+                                className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] rounded-lg flex items-center gap-1 shadow-sm transition-colors cursor-pointer"
+                                title="Salvar alterações"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                Salvar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleCancelEditMovement}
+                                className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-[11px] rounded-lg flex items-center gap-1 transition-colors cursor-pointer"
+                                title="Cancelar edição"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                                Cancelar
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Tipo de Movimento */}
+                          <div className="grid grid-cols-3 gap-1 bg-slate-900 p-1 rounded-lg text-[11px] text-center">
+                            <button
+                              type="button"
+                              onClick={() => setEditMovType('in')}
+                              className={`py-1 rounded font-semibold transition-all ${
+                                editMovType === 'in' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              + Entrada
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditMovType('out')}
+                              className={`py-1 rounded font-semibold transition-all ${
+                                editMovType === 'out' ? 'bg-rose-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              - Saída
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditMovType('adjust')}
+                              className={`py-1 rounded font-semibold transition-all ${
+                                editMovType === 'adjust' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              = Inventário
+                            </button>
+                          </div>
+
+                          {/* Campos: Motivo, Qtd, Data */}
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <div className="sm:col-span-1">
+                              <label className="text-[10px] text-slate-400 block mb-1">Motivo / Razão</label>
+                              <input
+                                type="text"
+                                value={editMovReason}
+                                onChange={(e) => setEditMovReason(e.target.value)}
+                                className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs focus:border-amber-400 outline-none"
+                                placeholder="Motivo da movimentação"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-slate-400 block mb-1">
+                                Quantidade ({draftProduct.unit || 'un'})
+                              </label>
+                              <input
+                                type="number"
+                                value={editMovQty}
+                                onChange={(e) => setEditMovQty(e.target.value)}
+                                className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono text-xs focus:border-amber-400 outline-none"
+                                placeholder="10"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-slate-400 block mb-1">Data / Hora</label>
+                              <input
+                                type="text"
+                                value={editMovDate}
+                                onChange={(e) => setEditMovDate(e.target.value)}
+                                className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono text-xs focus:border-amber-400 outline-none"
+                                placeholder="AAAA-MM-DD HH:MM"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+
                     return (
                       <div
                         key={mov.id}
-                        className="p-3 rounded-xl bg-slate-950/70 border border-slate-800/80 flex items-center justify-between text-xs"
+                        className="p-3 rounded-xl bg-slate-950/70 hover:bg-slate-950 border border-slate-800/80 hover:border-slate-700 transition-colors flex items-center justify-between text-xs group"
                       >
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-3 min-w-0 pr-2">
                           <span
-                            className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs ${
+                            className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 ${
                               isPlus
                                 ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                                 : isMinus
@@ -1313,23 +1740,46 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                           >
                             {isPlus ? '+' : isMinus ? '-' : '='}
                           </span>
-                          <div>
-                            <div className="font-semibold text-white">{mov.reason}</div>
-                            <div className="text-[10px] text-slate-400">{mov.date}</div>
+                          <div className="min-w-0">
+                            <div className="font-semibold text-white truncate">{mov.reason}</div>
+                            <div className="text-[10px] text-slate-400 font-mono">{mov.date}</div>
                           </div>
                         </div>
 
-                        <div className="text-right font-mono">
-                          <div
-                            className={`font-bold ${
-                              isPlus ? 'text-emerald-400' : isMinus ? 'text-rose-400' : 'text-indigo-400'
-                            }`}
-                          >
-                            {isPlus ? `+${mov.quantity}` : isMinus ? `-${mov.quantity}` : `=${mov.quantity}`}{' '}
-                            {draftProduct.unit || 'un'}
+                        <div className="flex items-center gap-3 shrink-0">
+                          {/* Saldo e Quantidade */}
+                          <div className="text-right font-mono">
+                            <div
+                              className={`font-bold ${
+                                isPlus ? 'text-emerald-400' : isMinus ? 'text-rose-400' : 'text-indigo-400'
+                              }`}
+                            >
+                              {isPlus ? `+${mov.quantity}` : isMinus ? `-${mov.quantity}` : `=${mov.quantity}`}{' '}
+                              {draftProduct.unit || 'un'}
+                            </div>
+                            <div className="text-[10px] text-slate-500">
+                              Saldo: {mov.previousStock} → {mov.newStock}
+                            </div>
                           </div>
-                          <div className="text-[10px] text-slate-500">
-                            Saldo: {mov.previousStock} → {mov.newStock}
+
+                          {/* Botões de Ação no Canto Direito: Editar e Excluir */}
+                          <div className="flex items-center gap-1 pl-2 border-l border-slate-800">
+                            <button
+                              type="button"
+                              onClick={() => handleStartEditMovement(mov)}
+                              className="p-1.5 text-slate-400 hover:text-amber-300 hover:bg-amber-500/15 rounded-lg transition-colors cursor-pointer"
+                              title="Editar este lançamento do histórico"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteMovement(mov.id)}
+                              className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/15 rounded-lg transition-colors cursor-pointer"
+                              title="Excluir este lançamento do histórico"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
                         </div>
                       </div>
@@ -1352,18 +1802,26 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
               <strong className="text-white font-mono">{formatBRL(draftProduct.currentPrice)}</strong>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setProductToDelete(draftProduct)}
+                className="px-4 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-rose-200 text-xs font-semibold border border-rose-500/30 transition-all flex items-center gap-1.5 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Excluir Produto
+              </button>
               <button
                 type="button"
                 onClick={() => setStudioMode('list')}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition-all"
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition-all cursor-pointer"
               >
                 Cancelar
               </button>
               <button
                 type="button"
                 onClick={handleSaveDraftProduct}
-                className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all flex items-center gap-2"
+                className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all flex items-center gap-2 cursor-pointer"
               >
                 <Check className="w-4 h-4" />
                 Salvar Produto & Atualizar Catálogo
@@ -1372,6 +1830,125 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
           </div>
         </div>
       )}
+
+      {/* Unit of Measure Roulette Modal */}
+      <UnitSelectorModal
+        isOpen={isUnitModalOpen}
+        onClose={() => setIsUnitModalOpen(false)}
+        currentUnit={draftProduct.unit || 'un'}
+        onSelectUnit={(selectedUnitCode) => {
+          setDraftProduct((prev) => ({ ...prev, unit: selectedUnitCode }));
+        }}
+      />
+
+      {/* Spreadsheet Import Modal (Excel / CSV / Copy-Paste) */}
+      <SpreadsheetImportModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        currentProductsCount={products.length}
+        onImport={(importedProducts, mode) => {
+          if (onBatchImportProducts) {
+            onBatchImportProducts(importedProducts, mode);
+          } else {
+            importedProducts.forEach((p) => onAddProduct(p));
+          }
+        }}
+      />
+
+      {/* Delete Product Confirmation Modal */}
+      {productToDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
+          onClick={() => setProductToDelete(null)}
+        >
+          <div
+            className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-400 shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-base font-bold text-white">Excluir Produto do Catálogo</h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  Tem certeza que deseja excluir este item? Esta ação removerá o produto e sua ficha técnica do catálogo e do banco de dados.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1 text-xs">
+              <div className="font-bold text-white truncate">{productToDelete.name}</div>
+              <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
+                <span>{productToDelete.sku || 'SEM SKU'}</span>
+                <span>·</span>
+                <span className="font-sans">{productToDelete.category}</span>
+                <span>·</span>
+                <span className="text-emerald-400">{formatBRL(productToDelete.currentPrice)}</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setProductToDelete(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition-colors cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const idToDelete = productToDelete.id;
+                  onDeleteProduct(idToDelete);
+                  if (studioMode === 'edit' && draftProduct.id === idToDelete) {
+                    setStudioMode('list');
+                  }
+                  setProductToDelete(null);
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-500/20 transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Confirmar Exclusão
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Channel Selling Prices Modal (All Available Fees) */}
+      <ChannelSellingPricesModal
+        isOpen={isSellingPricesModalOpen}
+        onClose={() => setIsSellingPricesModalOpen(false)}
+        productName={draftProduct.name}
+        cost={draftProduct.cost}
+        targetNetMargin={draftProduct.targetNetMargin}
+        currentBasePrice={draftProduct.currentPrice}
+        channels={channels}
+        onChangeCost={(newCost) => {
+          const refFee = getReferenceFeeRate(referenceChannelId);
+          const calc = computeChannelSellingPrice(newCost, draftProduct.targetNetMargin, refFee);
+          setDraftProduct((prev) => ({
+            ...prev,
+            cost: newCost,
+            costMethod: 'manual',
+            currentPrice: calc.feasible ? calc.sellingPrice : prev.currentPrice,
+          }));
+        }}
+        onChangeTargetMargin={(newMargin) => {
+          const refFee = getReferenceFeeRate(referenceChannelId);
+          const calc = computeChannelSellingPrice(draftProduct.cost, newMargin, refFee);
+          setDraftProduct((prev) => ({
+            ...prev,
+            targetNetMargin: newMargin,
+            currentPrice: draftProduct.cost > 0 && calc.feasible ? calc.sellingPrice : prev.currentPrice,
+          }));
+        }}
+        onApplyPrice={(price, channelName) => {
+          const matched = channels.find((c) => c.name === channelName);
+          if (matched) setReferenceChannelId(matched.id);
+          setDraftProduct((prev) => ({ ...prev, currentPrice: price }));
+        }}
+      />
     </div>
   );
 };
