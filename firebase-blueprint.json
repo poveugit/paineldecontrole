@@ -21,6 +21,10 @@
         "minStock": { "type": "number" },
         "maxStock": { "type": "number" },
         "costMethod": { "type": "string" },
+        "kiloFractions": { "type": "array", "description": "Configured fractional kilo weights and selling prices" },
+        "kgBaseCost": { "type": "number", "description": "Reference 1kg cost when a fractional portion is active" },
+        "primaryFractionGrams": { "type": "number", "description": "Active fractional weight in grams used as main catalog price" },
+        "targetNetProfitBRL": { "type": "number", "description": "Optional fixed target net profit in BRL per unit sold" },
         "updatedAt": { "type": "string" }
       },
       "required": ["id", "name", "category", "cost", "currentPrice"]

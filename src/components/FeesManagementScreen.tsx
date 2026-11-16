@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChannelFee, UserProfile, ProductItem } from '../types/pricing';
-import { INITIAL_CHANNELS, formatBRL } from '../utils/pricingEngine';
+import { INITIAL_CHANNELS, formatBRL, normalizeSearchText } from '../utils/pricingEngine';
 
 interface FeesManagementScreenProps {
   channels: ChannelFee[];
@@ -156,9 +156,11 @@ export const FeesManagementScreen: React.FC<FeesManagementScreenProps> = ({
   const filteredChannels = useMemo(() => {
     return localChannels
       .filter((c) => {
+        const q = normalizeSearchText(searchTerm);
         const matchesSearch =
-          c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          c.platformName.toLowerCase().includes(searchTerm.toLowerCase());
+          !q ||
+          normalizeSearchText(c.name).includes(q) ||
+          normalizeSearchText(c.platformName).includes(q);
         const matchesPlatform =
           selectedPlatformFilter === 'all' || c.platform === selectedPlatformFilter;
         return matchesSearch && matchesPlatform;

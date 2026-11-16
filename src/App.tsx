@@ -56,6 +56,8 @@ import {
   dbSaveChannels,
   dbSaveFixedExpenses,
   dbSaveCompetitors,
+  dbSaveCustomCategories,
+  dbSubscribeCustomCategories,
 } from './lib/firebase';
 import firebaseConfig from '../firebase-applet-config.json';
 import { motion, AnimatePresence } from 'motion/react';
@@ -130,6 +132,19 @@ export default function App() {
   const [competitors, setCompetitors] = useState<CompetitorItem[]>(() => {
     const saved = localStorage.getItem('omniprice_competitors');
     return saved ? JSON.parse(saved) : INITIAL_COMPETITORS;
+  });
+
+  const [customCategories, setCustomCategories] = useState<string[]>(() => {
+    const saved = localStorage.getItem('omniprice_custom_categories');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
   });
 
   const [currentUser, setCurrentUser] = useState<UserProfile>(USERS[0]); // Admin by default
@@ -220,6 +235,7 @@ export default function App() {
   // Firebase Firestore Live Connection, Seed and Subscription
   useEffect(() => {
     let unsubscribeProducts: (() => void) | undefined;
+    let unsubscribeCategories: (() => void) | undefined;
 
     const setupDatabase = async () => {
       try {
@@ -238,6 +254,14 @@ export default function App() {
               setLastSyncTime(new Date());
             }
           });
+
+          // Real-time listener for custom product categories
+          unsubscribeCategories = dbSubscribeCustomCategories((remoteCats) => {
+            setCustomCategories((prev) => {
+              const merged = Array.from(new Set([...prev, ...remoteCats]));
+              return merged;
+            });
+          });
         }
       } catch (err) {
         console.warn('Firebase initialization check:', err);
@@ -248,6 +272,7 @@ export default function App() {
 
     return () => {
       if (unsubscribeProducts) unsubscribeProducts();
+      if (unsubscribeCategories) unsubscribeCategories();
     };
   }, []);
 
@@ -279,6 +304,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('omniprice_competitors', JSON.stringify(competitors));
   }, [competitors]);
+
+  useEffect(() => {
+    localStorage.setItem('omniprice_custom_categories', JSON.stringify(customCategories));
+  }, [customCategories]);
 
   useEffect(() => {
     localStorage.setItem('omniprice_widgets', JSON.stringify(widgets));
@@ -547,6 +576,11 @@ export default function App() {
         ...prev,
       ]);
     }
+  };
+
+  const handleSaveCustomCategories = (nextCategories: string[]) => {
+    setCustomCategories(nextCategories);
+    dbSaveCustomCategories(nextCategories).then(() => setLastSyncTime(new Date())).catch(console.error);
   };
 
   // Batch Import Products from Spreadsheet
@@ -919,6 +953,8 @@ export default function App() {
                 products={products}
                 selectedProduct={selectedProduct}
                 channels={channels}
+                customCategories={customCategories}
+                onSaveCustomCategories={handleSaveCustomCategories}
                 onSelectProduct={(p) => {
                   setSelectedProduct(p);
                 }}

@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { WidgetItem, DepartmentKey } from '../types/pricing';
+import { normalizeSearchText } from '../utils/pricingEngine';
 
 interface QuickNavDrawerProps {
   isOpen: boolean;
@@ -43,9 +44,11 @@ export const QuickNavDrawer: React.FC<QuickNavDrawerProps> = ({
   const visibleWidgets = widgets.filter((w) => w.visible);
 
   const filteredWidgets = visibleWidgets.filter((w) => {
+    const q = normalizeSearchText(searchTerm);
     const matchesSearch =
-      w.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      w.description.toLowerCase().includes(searchTerm.toLowerCase());
+      !q ||
+      normalizeSearchText(w.title).includes(q) ||
+      normalizeSearchText(w.description).includes(q);
     const matchesDept = selectedFilter === 'all' || w.department === selectedFilter;
     return matchesSearch && matchesDept;
   });

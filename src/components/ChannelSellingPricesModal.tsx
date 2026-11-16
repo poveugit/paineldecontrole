@@ -10,6 +10,8 @@ import {
   Smartphone,
   ShieldCheck,
   Calculator,
+  Minus,
+  Plus,
 } from 'lucide-react';
 import { ChannelFee } from '../types/pricing';
 import { formatBRL } from '../utils/pricingEngine';
@@ -20,10 +22,12 @@ interface ChannelSellingPricesModalProps {
   productName: string;
   cost: number;
   targetNetMargin: number;
+  targetNetProfitBRL?: number;
   currentBasePrice: number;
   channels: ChannelFee[];
   onChangeCost: (newCost: number) => void;
   onChangeTargetMargin: (newMargin: number) => void;
+  onChangeTargetNetProfitBRL?: (newProfitBRL: number | undefined) => void;
   onApplyPrice: (price: number, channelName: string) => void;
 }
 
@@ -33,10 +37,12 @@ export const ChannelSellingPricesModal: React.FC<ChannelSellingPricesModalProps>
   productName,
   cost,
   targetNetMargin,
+  targetNetProfitBRL,
   currentBasePrice,
   channels,
   onChangeCost,
   onChangeTargetMargin,
+  onChangeTargetNetProfitBRL,
   onApplyPrice,
 }) => {
   const [platformFilter, setPlatformFilter] = useState<string>('all');
@@ -52,14 +58,42 @@ export const ChannelSellingPricesModal: React.FC<ChannelSellingPricesModalProps>
     return Array.from(map.entries());
   }, [channels]);
 
+  const hasFixedProfitGoal =
+    typeof targetNetProfitBRL === 'number' && targetNetProfitBRL > 0;
+
   const calculatedRows = useMemo(() => {
     const safeCost = Math.max(0, Number(cost) || 0);
     const safeMargin = Math.max(0, Math.min(0.9, Number(targetNetMargin) || 0));
+    const safeProfitBRL = hasFixedProfitGoal ? Number(targetNetProfitBRL) : 0;
 
     return channels
       .filter((c) => platformFilter === 'all' || c.platform === platformFilter)
       .map((channel) => {
         const feeRate = (Number(channel.totalRate) || 0) / 100;
+        if (hasFixedProfitGoal) {
+          const denominator = 1 - feeRate;
+          const feasible = denominator > 0.02;
+          const canCompute = feasible && (safeCost > 0 || safeProfitBRL > 0);
+          const sellingPrice = canCompute
+            ? Number(((safeCost + safeProfitBRL) / denominator).toFixed(2))
+            : 0;
+          const feeAmount = canCompute ? Number((sellingPrice * feeRate).toFixed(2)) : 0;
+          const netProfit = canCompute
+            ? Number((sellingPrice - safeCost - feeAmount).toFixed(2))
+            : 0;
+          const realMarginPct = sellingPrice > 0 ? (netProfit / sellingPrice) * 100 : 0;
+          const markup = safeCost > 0 && sellingPrice > 0 ? sellingPrice / safeCost : 0;
+          return {
+            channel,
+            feasible,
+            sellingPrice,
+            feeAmount,
+            netProfit,
+            realMarginPct,
+            markup,
+          };
+        }
+
         const denominator = 1 - safeMargin - feeRate;
         const feasible = denominator > 0.02;
         const sellingPrice = feasible && safeCost > 0 ? Number((safeCost / denominator).toFixed(2)) : 0;
@@ -78,13 +112,16 @@ export const ChannelSellingPricesModal: React.FC<ChannelSellingPricesModalProps>
           markup,
         };
       });
-  }, [channels, cost, targetNetMargin, platformFilter]);
+  }, [channels, cost, targetNetMargin, targetNetProfitBRL, hasFixedProfitGoal, platformFilter]);
 
   if (!isOpen) return null;
 
   const directDenominator = 1 - Math.max(0, Math.min(0.9, Number(targetNetMargin) || 0));
-  const zeroFeePrice =
-    directDenominator > 0.02 && cost > 0 ? Number((cost / directDenominator).toFixed(2)) : 0;
+  const zeroFeePrice = hasFixedProfitGoal
+    ? Number((Math.max(0, Number(cost) || 0) + Number(targetNetProfitBRL || 0)).toFixed(2))
+    : directDenominator > 0.02 && cost > 0
+    ? Number((cost / directDenominator).toFixed(2))
+    : 0;
 
   return (
     <div
@@ -124,8 +161,8 @@ export const ChannelSellingPricesModal: React.FC<ChannelSellingPricesModalProps>
           </button>
         </div>
 
-        {/* Live Cost & Margin Controls */}
-        <div className="p-4 sm:px-5 bg-slate-900/90 border-b border-slate-800 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+        {/* Live Cost, Profit Goal & Margin Controls */}
+        <div className="p-4 sm:px-5 bg-slate-900/90 border-b border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
           <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3">
             <label className="text-[11px] text-slate-400 font-semibold block mb-1">
               Preço de Custo (CMV) (R$)
@@ -144,29 +181,106 @@ export const ChannelSellingPricesModal: React.FC<ChannelSellingPricesModalProps>
             </div>
           </div>
 
-          <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3">
-            <label className="text-[11px] text-slate-400 font-semibold block mb-1">
-              Margem Líquida Alvo Desejada (%)
-            </label>
+          <div
+            className={`bg-slate-950/80 border rounded-xl p-3 transition-colors ${
+              hasFixedProfitGoal ? 'border-cyan-500/60' : 'border-slate-800'
+            }`}
+          >
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[11px] text-slate-400 font-semibold">
+                Meta de Lucro Líquido (R$)
+              </label>
+              {hasFixedProfitGoal && onChangeTargetNetProfitBRL && (
+                <button
+                  type="button"
+                  onClick={() => onChangeTargetNetProfitBRL(undefined)}
+                  className="text-[10px] text-slate-400 hover:text-rose-400 cursor-pointer"
+                >
+                  Limpar
+                </button>
+              )}
+            </div>
             <div className="relative">
+              <span className="absolute left-3 top-2 text-slate-500 font-mono text-xs">R$</span>
               <input
                 type="number"
-                step="1"
+                step="0.10"
                 min="0"
-                max="85"
-                value={Number((targetNetMargin * 100).toFixed(1))}
-                onChange={(e) =>
-                  onChangeTargetMargin(Math.max(0, Math.min(85, parseFloat(e.target.value) || 0)) / 100)
-                }
-                className="w-full pl-3 pr-8 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-cyan-300 font-bold font-mono focus:outline-none focus:border-emerald-500"
+                value={targetNetProfitBRL && targetNetProfitBRL > 0 ? targetNetProfitBRL : ''}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  onChangeTargetNetProfitBRL?.(!Number.isNaN(val) && val > 0 ? val : undefined);
+                }}
+                placeholder="Opcional (ex: 1,00)"
+                className="w-full pl-9 pr-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-emerald-300 font-bold font-mono focus:outline-none focus:border-cyan-400"
               />
-              <Percent className="w-3.5 h-3.5 text-slate-500 absolute right-3 top-2" />
+            </div>
+          </div>
+
+          <div
+            className={`bg-slate-950/80 border rounded-xl p-3 ${
+              hasFixedProfitGoal ? 'border-slate-800/60 opacity-70' : 'border-slate-800'
+            }`}
+          >
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[11px] text-slate-400 font-semibold">
+                Margem Líquida Alvo (%)
+              </label>
+              {hasFixedProfitGoal && (
+                <span className="text-[9px] text-cyan-400 font-mono">Usando R$</span>
+              )}
+            </div>
+            <div className="flex items-stretch bg-slate-900 border border-slate-700 rounded-lg overflow-hidden focus-within:border-emerald-500">
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeTargetMargin(
+                    Math.max(0, Math.round(targetNetMargin * 100) - 1) / 100
+                  )
+                }
+                className="px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border-r border-slate-700 flex items-center justify-center transition-colors cursor-pointer"
+                title="Diminuir margem em 1%"
+              >
+                <Minus className="w-3.5 h-3.5" />
+              </button>
+              <div className="relative flex-1 min-w-0">
+                <input
+                  type="number"
+                  step="1"
+                  min="0"
+                  max="85"
+                  value={Number((targetNetMargin * 100).toFixed(1))}
+                  onChange={(e) =>
+                    onChangeTargetMargin(
+                      Math.max(0, Math.min(85, parseFloat(e.target.value) || 0)) / 100
+                    )
+                  }
+                  className="w-full pl-2 pr-6 py-1.5 bg-transparent text-center text-cyan-300 font-bold font-mono focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                />
+                <span className="absolute right-2 top-1.5 text-[11px] text-slate-500 font-mono pointer-events-none">
+                  %
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeTargetMargin(
+                    Math.min(85, Math.round(targetNetMargin * 100) + 1) / 100
+                  )
+                }
+                className="px-2.5 bg-slate-800 hover:bg-emerald-500/20 text-emerald-400 border-l border-slate-700 flex items-center justify-center transition-colors cursor-pointer"
+                title="Aumentar margem em 1%"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
             </div>
           </div>
 
           <div className="bg-emerald-950/25 border border-emerald-500/30 rounded-xl p-3 flex flex-col justify-between">
             <span className="text-[11px] text-emerald-300 font-semibold">
-              Preço Sem Taxa (Balcão 0%) vs Preço Salvo
+              {hasFixedProfitGoal
+                ? `Balcão 0% (+${formatBRL(targetNetProfitBRL || 0)}) vs Salvo`
+                : 'Preço Sem Taxa (Balcão 0%) vs Salvo'}
             </span>
             <div className="flex items-baseline justify-between gap-2 mt-1">
               <span className="text-base font-bold font-mono text-emerald-400">
@@ -210,7 +324,7 @@ export const ChannelSellingPricesModal: React.FC<ChannelSellingPricesModalProps>
 
         {/* Channels Pricing Table */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-5">
-          {cost <= 0 ? (
+          {cost <= 0 && !hasFixedProfitGoal ? (
             <div className="py-12 text-center bg-slate-950/60 border border-dashed border-slate-800 rounded-2xl">
               <DollarSign className="w-10 h-10 text-amber-400 mx-auto mb-2 opacity-80" />
               <p className="text-sm font-bold text-white">Informe o Preço de Custo acima</p>
@@ -345,7 +459,21 @@ export const ChannelSellingPricesModal: React.FC<ChannelSellingPricesModalProps>
           <div className="flex items-center gap-2 text-slate-400">
             <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>
-              Fórmula Blindada: <strong className="text-slate-200 font-mono">Preço = Custo / (1 - Margem Alvo - Taxa do Canal)</strong>
+              {hasFixedProfitGoal ? (
+                <>
+                  Fórmula Lucro Fixo:{' '}
+                  <strong className="text-slate-200 font-mono">
+                    Preço = (Custo + Lucro R$) / (1 - Taxa do Canal)
+                  </strong>
+                </>
+              ) : (
+                <>
+                  Fórmula Blindada:{' '}
+                  <strong className="text-slate-200 font-mono">
+                    Preço = Custo / (1 - Margem Alvo - Taxa do Canal)
+                  </strong>
+                </>
+              )}
             </span>
           </div>
           <button

@@ -19,6 +19,7 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { normalizeSearchText } from '../utils/pricingEngine';
 
 export interface UnitDefinition {
   id: string;
@@ -186,10 +187,12 @@ export const UnitSelectorModal: React.FC<UnitSelectorModalProps> = ({
 
   // Filtered list of units
   const filteredUnits = units.filter((u) => {
+    const q = normalizeSearchText(searchFilter);
     const matchesSearch =
-      u.code.toLowerCase().includes(searchFilter.toLowerCase()) ||
-      u.name.toLowerCase().includes(searchFilter.toLowerCase()) ||
-      u.description.toLowerCase().includes(searchFilter.toLowerCase());
+      !q ||
+      normalizeSearchText(u.code).includes(q) ||
+      normalizeSearchText(u.name).includes(q) ||
+      normalizeSearchText(u.description).includes(q);
     const matchesCategory = categoryFilter === 'todos' || u.category === categoryFilter;
     return matchesSearch && matchesCategory;
   });

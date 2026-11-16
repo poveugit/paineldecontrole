@@ -49,6 +49,13 @@ export interface StockMovement {
   newStock: number;
 }
 
+export interface KiloFractionOption {
+  id: string;
+  label: string;
+  grams: number; // Quantidade fracionada em gramas (ex: 100, 250, 500)
+  sellingPrice: number; // Valor de venda praticado para essa fração do kilo
+}
+
 export interface ProductItem {
   id: string;
   name: string;
@@ -68,6 +75,10 @@ export interface ProductItem {
   ingredients?: ProductIngredient[];
   stockHistory?: StockMovement[];
   costMethod?: 'manual' | 'recipe'; // Se o custo é calculado pela ficha ou digitado
+  kiloFractions?: KiloFractionOption[];
+  kgBaseCost?: number; // Custo de referência de 1 kg (1000g) quando há fração principal ativa
+  primaryFractionGrams?: number; // Fração ativa em gramas usada como custo/preço principal no catálogo
+  targetNetProfitBRL?: number; // Meta opcional de lucro líquido fixo em R$ por unidade vendida
 }
 
 export interface FixedExpenses {

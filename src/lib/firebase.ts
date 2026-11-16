@@ -254,6 +254,50 @@ export const dbSaveCompetitors = async (competitors: CompetitorItem[]): Promise<
   }
 };
 
+// Save Custom Product Categories
+export const dbSaveCustomCategories = async (categories: string[]): Promise<void> => {
+  const path = 'settings/custom_categories';
+  try {
+    await initAuth();
+    const docRef = doc(db, 'settings', 'custom_categories');
+    await setDoc(
+      docRef,
+      {
+        id: 'custom_categories',
+        type: 'custom_categories',
+        items: categories,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+};
+
+// Subscribe to Custom Product Categories
+export const dbSubscribeCustomCategories = (
+  onData: (categories: string[]) => void,
+  onError?: (err: Error) => void
+) => {
+  const docRef = doc(db, 'settings', 'custom_categories');
+  return onSnapshot(
+    docRef,
+    (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data() as { items?: unknown };
+        if (Array.isArray(data.items)) {
+          onData(data.items.filter((x): x is string => typeof x === 'string' && x.trim().length > 0));
+        }
+      }
+    },
+    (err) => {
+      console.warn('[Firestore] Custom categories subscription error:', err);
+      onError?.(err);
+    }
+  );
+};
+
 // Subscribe to real-time products
 export const dbSubscribeProducts = (
   onData: (products: ProductItem[]) => void,

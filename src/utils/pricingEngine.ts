@@ -826,6 +826,26 @@ export function normalizeProduct(product: ProductItem): ProductItem {
     active: product.active ?? true,
     ingredients,
     stockHistory,
+    ...(Array.isArray(product.kiloFractions) ? { kiloFractions: product.kiloFractions } : {}),
+    ...(typeof product.kgBaseCost === 'number' ? { kgBaseCost: product.kgBaseCost } : {}),
+    ...(typeof product.primaryFractionGrams === 'number'
+      ? { primaryFractionGrams: product.primaryFractionGrams }
+      : {}),
+    ...(typeof product.targetNetProfitBRL === 'number'
+      ? { targetNetProfitBRL: product.targetNetProfitBRL }
+      : {}),
   };
 }
+
+/**
+ * Normaliza textos para buscas sem diferenciar acentos, cedilha ou maiúsculas/minúsculas.
+ */
+export function normalizeSearchText(text?: string | null): string {
+  return (text ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
 
