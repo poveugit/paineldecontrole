@@ -79,6 +79,7 @@ export interface ProductItem {
   kgBaseCost?: number; // Custo de referência de 1 kg (1000g) quando há fração principal ativa
   primaryFractionGrams?: number; // Fração ativa em gramas usada como custo/preço principal no catálogo
   targetNetProfitBRL?: number; // Meta opcional de lucro líquido fixo em R$ por unidade vendida
+  referenceChannelId?: string; // Canal selecionado no estúdio para compor o preço base (ex: 'tf-credito')
 }
 
 export interface FixedExpenses {

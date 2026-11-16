@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import {
   Layers,
@@ -31,6 +31,10 @@ export const ChannelComparisonWidget: React.FC<ChannelComparisonWidgetProps> = (
 }) => {
   const [selectedPlatform, setSelectedPlatform] = useState<string>('all');
   const [testPrice, setTestPrice] = useState<number>(product.currentPrice || 9.84);
+
+  useEffect(() => {
+    setTestPrice(product.currentPrice || 9.84);
+  }, [product.id, product.currentPrice]);
 
   const filteredChannels =
     selectedPlatform === 'all' ? channels : channels.filter((c) => c.platform === selectedPlatform);

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -33,16 +33,27 @@ import { formatBRL, formatPercent } from '../utils/pricingEngine';
 interface PriceMarginEvolutionWidgetProps {
   product: ProductItem;
   channels: ChannelFee[];
+  preferredChannelId?: string;
 }
 
 export const PriceMarginEvolutionWidget: React.FC<PriceMarginEvolutionWidgetProps> = ({
   product,
   channels,
+  preferredChannelId,
 }) => {
   const [activeTab, setActiveTab] = useState<'sensitivity' | 'timeline'>('sensitivity');
-  const [selectedChannelId, setSelectedChannelId] = useState<string>('uai-online');
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(
+    preferredChannelId || product.referenceChannelId || channels[0]?.id || 'uai-online'
+  );
   const [inflationRate, setInflationRate] = useState<number>(0); // 0% to +40%
   const [enableDynamicRepricing, setEnableDynamicRepricing] = useState<boolean>(true);
+
+  useEffect(() => {
+    const nextChannel = preferredChannelId || product.referenceChannelId;
+    if (nextChannel && channels.some((c) => c.id === nextChannel)) {
+      setSelectedChannelId(nextChannel);
+    }
+  }, [preferredChannelId, product.id, product.referenceChannelId, channels]);
 
   // Selected channel details
   const activeChannel = channels.find((c) => c.id === selectedChannelId) || channels[0];
@@ -213,7 +224,7 @@ export const PriceMarginEvolutionWidget: React.FC<PriceMarginEvolutionWidgetProp
             onChange={(e) => setSelectedChannelId(e.target.value)}
             className="px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-xl text-xs font-semibold text-white focus:outline-none focus:border-cyan-500"
           >
-            {channels.slice(0, 8).map((c) => (
+            {channels.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name} ({c.totalRate}%)
               </option>

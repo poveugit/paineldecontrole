@@ -124,6 +124,38 @@ export default function App() {
     return saved ? JSON.parse(saved) : INITIAL_CHANNELS;
   });
 
+  const [dashboardChannelId, setDashboardChannelId] = useState<string>(() => {
+    return selectedProduct.referenceChannelId || channels[0]?.id || 'uai-online';
+  });
+
+  useEffect(() => {
+    if (selectedProduct.referenceChannelId) {
+      setDashboardChannelId(selectedProduct.referenceChannelId);
+    } else if (channels.length > 0 && !channels.some((c) => c.id === dashboardChannelId)) {
+      setDashboardChannelId(channels[0].id);
+    }
+  }, [selectedProduct.id, selectedProduct.referenceChannelId, channels]);
+
+  const activeDashboardChannel: ChannelFee =
+    dashboardChannelId === 'direct-zero'
+      ? {
+          id: 'direct-zero',
+          platform: 'balcao',
+          platformName: 'Balcão Direto',
+          name: 'Balcão Direto (Sem Taxa)',
+          totalRate: 0,
+          breakdown: { appBase: 0, paymentGateway: 0 },
+        }
+      : channels.find((c) => c.id === dashboardChannelId) ||
+        channels[0] || {
+          id: 'uai-online',
+          platform: 'uai_rango',
+          platformName: 'Uai Rango',
+          name: 'Uai Rango Pagamento Online',
+          totalRate: 17.49,
+          breakdown: { appBase: 12, paymentGateway: 3.5, anticipation: 1.99 },
+        };
+
   const [fixedExpenses, setFixedExpenses] = useState<FixedExpenses>(() => {
     const saved = localStorage.getItem('omniprice_fixed_expenses');
     return saved ? JSON.parse(saved) : INITIAL_FIXED_EXPENSES;
@@ -250,7 +282,12 @@ export default function App() {
           // Real-time listener for products from Cloud Firestore
           unsubscribeProducts = dbSubscribeProducts((remoteProds) => {
             if (remoteProds && remoteProds.length > 0) {
-              setProducts(remoteProds.map((p) => normalizeProduct(p)));
+              const normalizedRemote = remoteProds.map((p) => normalizeProduct(p));
+              setProducts(normalizedRemote);
+              setSelectedProduct((prev) => {
+                const match = normalizedRemote.find((rp) => rp.id === prev.id);
+                return match || prev;
+              });
               setLastSyncTime(new Date());
             }
           });
@@ -777,6 +814,7 @@ export default function App() {
             product={selectedProduct}
             fixedExpenses={fixedExpenses}
             channels={channels}
+            preferredChannelId={activeDashboardChannel.id}
           />
         );
 
@@ -787,6 +825,7 @@ export default function App() {
             channels={channels}
             canEditPrices={currentUser.permissions.canEditPrices}
             onApplyPrice={handleApplyRecommendedPrice}
+            preferredChannelId={activeDashboardChannel.id}
           />
         );
 
@@ -795,6 +834,7 @@ export default function App() {
           <PriceMarginEvolutionWidget
             product={selectedProduct}
             channels={channels}
+            preferredChannelId={activeDashboardChannel.id}
           />
         );
 
@@ -820,7 +860,7 @@ export default function App() {
           <DREWidget
             product={selectedProduct}
             fixedExpenses={fixedExpenses}
-            selectedChannel={channels[0]}
+            selectedChannel={activeDashboardChannel}
             onUpdateFixedExpenses={setFixedExpenses}
             canEditCosts={currentUser.permissions.canEditCosts}
           />
@@ -846,6 +886,7 @@ export default function App() {
             fixedExpenses={fixedExpenses}
             onApplyPrice={handleApplyRecommendedPrice}
             canEditPrices={currentUser.permissions.canEditPrices}
+            preferredChannelId={activeDashboardChannel.id}
           />
         );
 
@@ -1057,10 +1098,16 @@ export default function App() {
 
               {/* Active Product Selector Banner - Expansive full-width executive strip */}
               {(() => {
-                const primaryChannel = channels[0] || { totalRate: 17.49, name: 'Uai Rango Online' };
-                const feeAmt = (selectedProduct.currentPrice * primaryChannel.totalRate) / 100;
-                const netProfitAmt = selectedProduct.currentPrice - selectedProduct.cost - feeAmt;
-                const netMarginPercent = selectedProduct.currentPrice > 0 ? (netProfitAmt / selectedProduct.currentPrice) * 100 : 0;
+                const feeAmt = Number(
+                  ((selectedProduct.currentPrice * activeDashboardChannel.totalRate) / 100).toFixed(2)
+                );
+                const netProfitAmt = Number(
+                  (selectedProduct.currentPrice - selectedProduct.cost - feeAmt).toFixed(2)
+                );
+                const netMarginPercent =
+                  selectedProduct.currentPrice > 0
+                    ? (netProfitAmt / selectedProduct.currentPrice) * 100
+                    : 0;
 
                 return (
                   <div className="w-full p-4 sm:p-5 lg:p-6 rounded-3xl bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 border border-slate-800 shadow-xl flex flex-col xl:flex-row items-start xl:items-center justify-between gap-5">
@@ -1091,24 +1138,50 @@ export default function App() {
 
                     {/* Quick Metrics & Actions Bar */}
                     <div className="flex flex-wrap items-center gap-3 w-full xl:w-auto justify-between xl:justify-end">
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 bg-slate-950/80 p-2 sm:p-2.5 rounded-2xl border border-slate-800/80 text-xs w-full sm:w-auto">
-                        <div className="px-3 py-1">
-                          <span className="text-[10px] text-slate-400 uppercase block font-semibold">Custo CMV</span>
-                          <span className="font-mono font-bold text-white text-sm sm:text-base">{formatBRL(selectedProduct.cost)}</span>
+                      <div className="flex flex-col gap-2 w-full sm:w-auto">
+                        <div className="flex items-center justify-between gap-2 bg-slate-950/80 px-3 py-1.5 rounded-xl border border-slate-800/80 text-[11px]">
+                          <span className="text-slate-400 font-semibold shrink-0">Canal Avaliado:</span>
+                          <select
+                            value={activeDashboardChannel.id}
+                            onChange={(e) => setDashboardChannelId(e.target.value)}
+                            aria-label="Selecionar canal avaliado no painel"
+                            className="bg-transparent text-cyan-300 font-bold focus:outline-none cursor-pointer truncate max-w-[240px]"
+                          >
+                            {channels.map((ch) => (
+                              <option key={ch.id} value={ch.id} className="bg-slate-900 text-white">
+                                {ch.name} ({ch.totalRate.toFixed(2).replace('.', ',')}%)
+                              </option>
+                            ))}
+                            <option value="direct-zero" className="bg-slate-900 text-white">
+                              Balcão Direto — Sem Taxa (0,00%)
+                            </option>
+                          </select>
                         </div>
-                        <div className="px-3 py-1 border-l border-slate-800">
-                          <span className="text-[10px] text-slate-400 uppercase block font-semibold">Preço Venda</span>
-                          <span className="font-mono font-bold text-emerald-400 text-sm sm:text-base">{formatBRL(selectedProduct.currentPrice)}</span>
-                        </div>
-                        <div className="px-3 py-1 border-l border-slate-800">
-                          <span className="text-[10px] text-slate-400 uppercase block font-semibold">Taxa ({primaryChannel.totalRate}%)</span>
-                          <span className="font-mono font-bold text-rose-400 text-sm sm:text-base">- {formatBRL(feeAmt)}</span>
-                        </div>
-                        <div className="px-3 py-1 border-l border-slate-800">
-                          <span className="text-[10px] text-slate-400 uppercase block font-semibold">Lucro Real</span>
-                          <span className={`font-mono font-bold text-sm sm:text-base ${netProfitAmt > 0 ? 'text-emerald-300' : 'text-rose-400'}`}>
-                            {formatBRL(netProfitAmt)} <span className="text-[10px]">({netMarginPercent.toFixed(1)}%)</span>
-                          </span>
+
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 bg-slate-950/80 p-2 sm:p-2.5 rounded-2xl border border-slate-800/80 text-xs w-full sm:w-auto">
+                          <div className="px-3 py-1">
+                            <span className="text-[10px] text-slate-400 uppercase block font-semibold">Custo CMV</span>
+                            <span className="font-mono font-bold text-white text-sm sm:text-base">{formatBRL(selectedProduct.cost)}</span>
+                          </div>
+                          <div className="px-3 py-1 border-l border-slate-800">
+                            <span className="text-[10px] text-slate-400 uppercase block font-semibold">Preço Venda</span>
+                            <span className="font-mono font-bold text-emerald-400 text-sm sm:text-base">{formatBRL(selectedProduct.currentPrice)}</span>
+                          </div>
+                          <div className="px-3 py-1 border-l border-slate-800">
+                            <span
+                              className="text-[10px] text-slate-400 uppercase block font-semibold truncate max-w-[140px]"
+                              title={`${activeDashboardChannel.name} (${activeDashboardChannel.totalRate}%)`}
+                            >
+                              Taxa ({activeDashboardChannel.totalRate.toFixed(2).replace('.', ',')}%)
+                            </span>
+                            <span className="font-mono font-bold text-rose-400 text-sm sm:text-base">- {formatBRL(feeAmt)}</span>
+                          </div>
+                          <div className="px-3 py-1 border-l border-slate-800">
+                            <span className="text-[10px] text-slate-400 uppercase block font-semibold">Lucro Real</span>
+                            <span className={`font-mono font-bold text-sm sm:text-base ${netProfitAmt > 0 ? 'text-emerald-300' : 'text-rose-400'}`}>
+                              {formatBRL(netProfitAmt)} <span className="text-[10px]">({netMarginPercent.toFixed(1)}%)</span>
+                            </span>
+                          </div>
                         </div>
                       </div>
 

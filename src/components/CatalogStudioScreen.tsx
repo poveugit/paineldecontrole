@@ -150,7 +150,9 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
   const [draftProduct, setDraftProduct] = useState<ProductItem>(currentEditingProduct);
   const [isUnitModalOpen, setIsUnitModalOpen] = useState(false);
   const [isSellingPricesModalOpen, setIsSellingPricesModalOpen] = useState(false);
-  const [referenceChannelId, setReferenceChannelId] = useState<string>('direct-zero');
+  const [referenceChannelId, setReferenceChannelId] = useState<string>(
+    currentEditingProduct.referenceChannelId || channels[0]?.id || 'direct-zero'
+  );
   const [productToDelete, setProductToDelete] = useState<ProductItem | null>(null);
 
   const computeChannelSellingPrice = (
@@ -573,7 +575,9 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     const normalized = normalizeProduct(prod);
     setEditingProductId(prod.id);
     setDraftProduct(normalized);
-    setReferenceChannelId('direct-zero');
+    setReferenceChannelId(
+      normalized.referenceChannelId || channels[0]?.id || 'direct-zero'
+    );
     setIsAddingCategoryInline(false);
     setInlineCategoryName('');
     setFractionGramsInput(
@@ -593,6 +597,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     const initialCategory =
       forcedCategory ||
       (selectedCategory !== 'all' ? selectedCategory : categories[0] || 'Lanches');
+    const defaultChannelId = channels[0]?.id || 'direct-zero';
 
     const newProd: ProductItem = {
       id: `prod-${Date.now()}`,
@@ -602,6 +607,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
       cost: 0,
       currentPrice: 0,
       targetNetMargin: 0.25,
+      referenceChannelId: defaultChannelId,
       estimatedMonthlyUnits: 150,
       unit: 'un',
       currentStock: 30,
@@ -936,10 +942,12 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     if (!categories.some((c) => c.toLowerCase() === finalCat.toLowerCase())) {
       handleCreateCategory(finalCat);
     }
+    finalProduct = {
+      ...finalProduct,
+      referenceChannelId,
+    };
     onUpdateProduct(finalProduct);
-    if (selectedProduct.id === finalProduct.id) {
-      onSelectProduct(finalProduct);
-    }
+    onSelectProduct(finalProduct);
     if (selectedCategory !== 'all' && selectedCategory !== finalCat) {
       setSelectedCategory(finalCat);
     }
@@ -2409,6 +2417,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                               setFractionPriceInput(chPrice.toFixed(2));
                               setFractionPriceTouched(true);
                               setReferenceChannelId(ch.id);
+                              setDraftProduct((prev) => ({ ...prev, referenceChannelId: ch.id }));
                             }}
                             className="px-2 py-0.5 rounded-md bg-slate-900 hover:bg-emerald-500/15 border border-slate-700 hover:border-emerald-500/40 text-[10px] text-slate-300 hover:text-emerald-300 font-mono transition-colors cursor-pointer"
                             title={`Aplicar valor calculado para ${ch.name} (${ch.totalRate}%)`}
@@ -2584,6 +2593,10 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                       {isKiloUnit(draftProduct.unit) && draftProduct.primaryFractionGrams
                         ? ` (${formatGramsLabel(draftProduct.primaryFractionGrams)})`
                         : ''}
+                      {' · '}
+                      <span className="text-cyan-300">
+                        {channels.find((c) => c.id === referenceChannelId)?.name || 'Balcão 0%'}
+                      </span>
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-400 mt-0.5">
@@ -2635,6 +2648,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                           setReferenceChannelId(channel.id);
                           setDraftProduct((prev) => ({
                             ...prev,
+                            referenceChannelId: channel.id,
                             currentPrice: sellingPrice,
                             kiloFractions: (prev.kiloFractions || []).map((f) =>
                               prev.primaryFractionGrams &&
@@ -3365,6 +3379,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
           if (matched) setReferenceChannelId(matched.id);
           setDraftProduct((prev) => ({
             ...prev,
+            referenceChannelId: matched ? matched.id : prev.referenceChannelId,
             currentPrice: price,
             kiloFractions: (prev.kiloFractions || []).map((f) =>
               prev.primaryFractionGrams && Math.abs(f.grams - prev.primaryFractionGrams) < 0.01

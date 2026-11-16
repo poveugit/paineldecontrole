@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import {
   ShieldCheck,
@@ -18,6 +18,7 @@ interface BreakevenShieldedWidgetProps {
   fixedExpenses: FixedExpenses;
   onApplyPrice?: (price: number) => void;
   canEditPrices?: boolean;
+  preferredChannelId?: string;
 }
 
 export const BreakevenShieldedWidget: React.FC<BreakevenShieldedWidgetProps> = ({
@@ -26,9 +27,19 @@ export const BreakevenShieldedWidget: React.FC<BreakevenShieldedWidgetProps> = (
   fixedExpenses,
   onApplyPrice,
   canEditPrices = true,
+  preferredChannelId,
 }) => {
   const [targetMargin, setTargetMargin] = useState<number>(30); // 30% target margin
-  const [selectedChannelId, setSelectedChannelId] = useState<string>(channels[0]?.id || 'uai-rango');
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(
+    preferredChannelId || product.referenceChannelId || channels[0]?.id || 'uai-online'
+  );
+
+  useEffect(() => {
+    const nextChannel = preferredChannelId || product.referenceChannelId;
+    if (nextChannel && channels.some((c) => c.id === nextChannel)) {
+      setSelectedChannelId(nextChannel);
+    }
+  }, [preferredChannelId, product.id, product.referenceChannelId, channels]);
 
   const activeChannel = channels.find((c) => c.id === selectedChannelId) || channels[0] || {
     name: 'Uai Rango Online',

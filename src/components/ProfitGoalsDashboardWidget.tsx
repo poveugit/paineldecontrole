@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { motion } from 'motion/react';
 import {
   PieChart,
@@ -27,12 +27,14 @@ interface ProfitGoalsDashboardWidgetProps {
   product: ProductItem;
   fixedExpenses: FixedExpenses;
   channels: ChannelFee[];
+  preferredChannelId?: string;
 }
 
 export const ProfitGoalsDashboardWidget: React.FC<ProfitGoalsDashboardWidgetProps> = ({
   product,
   fixedExpenses,
   channels,
+  preferredChannelId,
 }) => {
   // Goal parameters (stored in local state with user configurability)
   const [revenueGoal, setRevenueGoal] = useState<number>(18000.0);
@@ -42,7 +44,16 @@ export const ProfitGoalsDashboardWidget: React.FC<ProfitGoalsDashboardWidgetProp
 
   // Realized performance parameters
   const [realizedUnitsSold, setRealizedUnitsSold] = useState<number>(275);
-  const [selectedChannelId, setSelectedChannelId] = useState<string>('uai-online');
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(
+    preferredChannelId || product.referenceChannelId || channels[0]?.id || 'uai-online'
+  );
+
+  useEffect(() => {
+    const nextChannel = preferredChannelId || product.referenceChannelId;
+    if (nextChannel && channels.some((c) => c.id === nextChannel)) {
+      setSelectedChannelId(nextChannel);
+    }
+  }, [preferredChannelId, product.id, product.referenceChannelId, channels]);
 
   const activeChannel = channels.find((c) => c.id === selectedChannelId) || channels[0];
   const feeRate = activeChannel.totalRate / 100;
@@ -125,7 +136,7 @@ export const ProfitGoalsDashboardWidget: React.FC<ProfitGoalsDashboardWidgetProp
             onChange={(e) => setSelectedChannelId(e.target.value)}
             className="bg-transparent text-emerald-400 font-bold focus:outline-none cursor-pointer"
           >
-            {channels.slice(0, 6).map((c) => (
+            {channels.map((c) => (
               <option key={c.id} value={c.id} className="bg-slate-900 text-white">
                 {c.name} ({c.totalRate}%)
               </option>

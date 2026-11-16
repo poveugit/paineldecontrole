@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Sliders,
   DollarSign,
@@ -24,6 +24,7 @@ interface WhatIfSimulatorWidgetProps {
   channels: ChannelFee[];
   canEditPrices: boolean;
   onApplyPrice: (price: number) => void;
+  preferredChannelId?: string;
 }
 
 export const WhatIfSimulatorWidget: React.FC<WhatIfSimulatorWidgetProps> = ({
@@ -31,10 +32,13 @@ export const WhatIfSimulatorWidget: React.FC<WhatIfSimulatorWidgetProps> = ({
   channels,
   canEditPrices,
   onApplyPrice,
+  preferredChannelId,
 }) => {
   // Variables state
   const [cost, setCost] = useState<number>(product.cost);
-  const [selectedChannelId, setSelectedChannelId] = useState<string>('uai-online');
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(
+    preferredChannelId || product.referenceChannelId || channels[0]?.id || 'uai-online'
+  );
   const [customAppFee, setCustomAppFee] = useState<number>(12.0); // % app
   const [paymentGatewayFee, setPaymentGatewayFee] = useState<number>(3.5); // % gateway
   const [anticipationFee, setAnticipationFee] = useState<number>(1.99); // % antecipacao
@@ -42,6 +46,24 @@ export const WhatIfSimulatorWidget: React.FC<WhatIfSimulatorWidgetProps> = ({
   const [packagingCost, setPackagingCost] = useState<number>(0.60); // R$ embalagem
   const [targetMargin, setTargetMargin] = useState<number>(25); // % margem liquida desejada
   const [monthlyUnits, setMonthlyUnits] = useState<number>(product.estimatedMonthlyUnits || 350);
+
+  useEffect(() => {
+    setCost(product.cost);
+    setMonthlyUnits(product.estimatedMonthlyUnits || 350);
+  }, [product.id, product.cost, product.estimatedMonthlyUnits]);
+
+  useEffect(() => {
+    const nextChannelId = preferredChannelId || product.referenceChannelId;
+    if (nextChannelId) {
+      const ch = channels.find((c) => c.id === nextChannelId);
+      if (ch) {
+        setSelectedChannelId(ch.id);
+        setCustomAppFee(ch.breakdown.appBase || 0);
+        setPaymentGatewayFee(ch.breakdown.paymentGateway || ch.breakdown.machineRate || 0);
+        setAnticipationFee(ch.breakdown.anticipation || 0);
+      }
+    }
+  }, [preferredChannelId, product.id, product.referenceChannelId, channels]);
 
   // Saved scenarios for instant comparison
   const [savedScenarios, setSavedScenarios] = useState<WhatIfScenario[]>([

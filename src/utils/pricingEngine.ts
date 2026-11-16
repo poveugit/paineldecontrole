@@ -834,6 +834,9 @@ export function normalizeProduct(product: ProductItem): ProductItem {
     ...(typeof product.targetNetProfitBRL === 'number'
       ? { targetNetProfitBRL: product.targetNetProfitBRL }
       : {}),
+    ...(typeof product.referenceChannelId === 'string' && product.referenceChannelId
+      ? { referenceChannelId: product.referenceChannelId }
+      : {}),
   };
 }
 

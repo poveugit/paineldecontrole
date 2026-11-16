@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import {
   FileText,
@@ -29,6 +29,10 @@ export const DREWidget: React.FC<DREWidgetProps> = ({
   canEditCosts,
 }) => {
   const [sellingPrice, setSellingPrice] = useState<number>(product.currentPrice || 9.84);
+
+  useEffect(() => {
+    setSellingPrice(product.currentPrice || 9.84);
+  }, [product.id, product.currentPrice]);
 
   // Unit DRE Calculation
   const feeAmount = sellingPrice * (selectedChannel.totalRate / 100);
