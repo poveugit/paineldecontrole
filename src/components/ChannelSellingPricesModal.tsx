@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { ChannelFee } from '../types/pricing';
 import { formatBRL } from '../utils/pricingEngine';
+import { CurrencyCentsInput } from './CurrencyCentsInput';
 
 interface ChannelSellingPricesModalProps {
   isOpen: boolean;
@@ -169,12 +170,10 @@ export const ChannelSellingPricesModal: React.FC<ChannelSellingPricesModalProps>
             </label>
             <div className="relative">
               <span className="absolute left-3 top-2 text-slate-500 font-mono text-xs">R$</span>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                value={cost || ''}
-                onChange={(e) => onChangeCost(Math.max(0, parseFloat(e.target.value) || 0))}
+              <CurrencyCentsInput
+                ariaLabel="Preço de Custo (CMV) (R$)"
+                value={cost || 0}
+                onChangeValue={onChangeCost}
                 placeholder="0,00"
                 className="w-full pl-9 pr-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-amber-300 font-bold font-mono focus:outline-none focus:border-emerald-500"
               />

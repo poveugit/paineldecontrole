@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import {
   Package,
   Layers,
@@ -47,6 +47,7 @@ import {
 import { UnitSelectorModal } from './UnitSelectorModal';
 import { SpreadsheetImportModal } from './SpreadsheetImportModal';
 import { ChannelSellingPricesModal } from './ChannelSellingPricesModal';
+import { CurrencyCentsInput } from './CurrencyCentsInput';
 
 interface CatalogStudioScreenProps {
   products: ProductItem[];
@@ -154,6 +155,9 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     currentEditingProduct.referenceChannelId || channels[0]?.id || 'direct-zero'
   );
   const [productToDelete, setProductToDelete] = useState<ProductItem | null>(null);
+  const [nameError, setNameError] = useState<string>('');
+  const [unsavedNewProductId, setUnsavedNewProductId] = useState<string | null>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
 
   const computeChannelSellingPrice = (
     costVal: number,
@@ -571,13 +575,15 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
   };
 
   // Sync draft when editingProductId changes
-  const handleStartEditing = (prod: ProductItem) => {
+  const handleStartEditing = (prod: ProductItem, isNewDraft = false) => {
     const normalized = normalizeProduct(prod);
     setEditingProductId(prod.id);
     setDraftProduct(normalized);
     setReferenceChannelId(
       normalized.referenceChannelId || channels[0]?.id || 'direct-zero'
     );
+    setNameError('');
+    setUnsavedNewProductId(isNewDraft ? prod.id : null);
     setIsAddingCategoryInline(false);
     setInlineCategoryName('');
     setFractionGramsInput(
@@ -593,6 +599,19 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const handleCancelEditing = () => {
+    if (
+      unsavedNewProductId &&
+      draftProduct.id === unsavedNewProductId &&
+      !draftProduct.name.trim()
+    ) {
+      onDeleteProduct(draftProduct.id);
+    }
+    setUnsavedNewProductId(null);
+    setNameError('');
+    setStudioMode('list');
+  };
+
   const handleCreateNewProduct = (forcedCategory?: string) => {
     const initialCategory =
       forcedCategory ||
@@ -602,7 +621,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     const newProd: ProductItem = {
       id: `prod-${Date.now()}`,
       sku: `PRD-${Math.floor(100 + Math.random() * 900)}`,
-      name: 'Novo Prato / Produto do Cardápio',
+      name: '',
       category: initialCategory,
       cost: 0,
       currentPrice: 0,
@@ -614,7 +633,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
       minStock: 10,
       maxStock: 100,
       costMethod: 'manual',
-      description: 'Descrição do novo item do cardápio.',
+      description: '',
       active: true,
       ingredients: [],
       stockHistory: [
@@ -631,7 +650,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
       isCustom: true,
     };
     const created = onAddProduct(newProd);
-    handleStartEditing(created || newProd);
+    handleStartEditing(created || newProd, true);
   };
 
   // Overall catalog metrics
@@ -939,13 +958,24 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
       }
     }
 
+    const trimmedName = draftProduct.name.trim();
+    if (!trimmedName) {
+      setNameError('Informe o nome do produto antes de salvar.');
+      nameInputRef.current?.focus();
+      nameInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+
     if (!categories.some((c) => c.toLowerCase() === finalCat.toLowerCase())) {
       handleCreateCategory(finalCat);
     }
     finalProduct = {
       ...finalProduct,
+      name: trimmedName,
       referenceChannelId,
     };
+    setNameError('');
+    setUnsavedNewProductId(null);
     onUpdateProduct(finalProduct);
     onSelectProduct(finalProduct);
     if (selectedCategory !== 'all' && selectedCategory !== finalCat) {
@@ -1029,7 +1059,9 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
               </button>
               <span>/</span>
               <span className="text-emerald-400 font-semibold">
-                {studioMode === 'list' ? 'Estúdio de Catálogo & Estoque' : `Editando: ${draftProduct.name}`}
+                {studioMode === 'list'
+                  ? 'Estúdio de Catálogo & Estoque'
+                  : `Editando: ${draftProduct.name.trim() || 'Novo Produto'}`}
               </span>
             </div>
             <div className="flex items-center gap-3">
@@ -1053,7 +1085,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
               <>
                 <button
                   type="button"
-                  onClick={() => setStudioMode('list')}
+                  onClick={handleCancelEditing}
                   className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-all flex items-center gap-1.5 cursor-pointer"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />
@@ -1406,12 +1438,12 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                             : 'bg-slate-800 text-slate-300 border border-slate-700'
                         }`}
                       >
-                        {p.name.slice(0, 2).toUpperCase()}
+                        {(p.name?.trim() || 'NP').slice(0, 2).toUpperCase()}
                       </div>
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="font-bold text-white text-xs sm:text-sm truncate">
-                            {p.name}
+                            {p.name?.trim() || 'Produto sem nome'}
                           </span>
                           {p.isCustom && (
                             <span className="text-[10px] px-1.5 py-0.2 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
@@ -1736,7 +1768,9 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                 <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block">
                   Identificação & Dados Comerciais
                 </span>
-                <h2 className="text-lg font-bold text-white mt-0.5">{draftProduct.name}</h2>
+                <h2 className="text-lg font-bold text-white mt-0.5">
+                  {draftProduct.name.trim() || 'Novo Produto'}
+                </h2>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -1761,11 +1795,24 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
               <div>
                 <label className="text-[11px] text-slate-400 block mb-1 font-semibold">Nome do Produto</label>
                 <input
+                  ref={nameInputRef}
                   type="text"
+                  autoFocus={unsavedNewProductId === draftProduct.id}
                   value={draftProduct.name}
-                  onChange={(e) => setDraftProduct({ ...draftProduct, name: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white font-medium focus:outline-none focus:border-emerald-500"
+                  placeholder="Digite o nome do produto..."
+                  onChange={(e) => {
+                    if (nameError) setNameError('');
+                    setDraftProduct({ ...draftProduct, name: e.target.value });
+                  }}
+                  className={`w-full px-3 py-2 bg-slate-950 border rounded-xl text-white font-medium focus:outline-none ${
+                    nameError
+                      ? 'border-rose-500 focus:border-rose-400'
+                      : 'border-slate-800 focus:border-emerald-500'
+                  }`}
                 />
+                {nameError && (
+                  <p className="text-[11px] text-rose-400 mt-1 font-medium">{nameError}</p>
+                )}
               </div>
 
               <div>
@@ -1938,18 +1985,19 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                 </div>
                 <div className="relative">
                   <span className="absolute left-3 top-2 text-slate-500 font-mono text-xs">R$</span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
+                  <CurrencyCentsInput
+                    ariaLabel={
+                      isKiloUnit(draftProduct.unit)
+                        ? 'Preço de Custo de 1 kg (R$/kg)'
+                        : 'Preço de Custo (R$)'
+                    }
                     value={
                       isKiloUnit(draftProduct.unit)
-                        ? getEffectiveKgCost(draftProduct) || ''
-                        : draftProduct.cost || ''
+                        ? getEffectiveKgCost(draftProduct)
+                        : draftProduct.cost || 0
                     }
                     placeholder="0,00"
-                    onChange={(e) => {
-                      const newInputCost = Math.max(0, parseFloat(e.target.value) || 0);
+                    onChangeValue={(newInputCost) => {
                       const refFee = getReferenceFeeRate(referenceChannelId);
 
                       if (isKiloUnit(draftProduct.unit)) {
@@ -3178,7 +3226,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
           {/* BOTTOM ACTIONS BAR - NON-FLOATING DEDICATED BUTTONS */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
             <div className="text-xs text-slate-400">
-              Produto: <strong className="text-white">{draftProduct.name}</strong>
+              Produto: <strong className="text-white">{draftProduct.name.trim() || 'Novo Produto'}</strong>
               {isKiloUnit(draftProduct.unit) && draftProduct.primaryFractionGrams && (
                 <>
                   {' '}
@@ -3204,7 +3252,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => setStudioMode('list')}
+                onClick={handleCancelEditing}
                 className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition-all cursor-pointer"
               >
                 Cancelar
