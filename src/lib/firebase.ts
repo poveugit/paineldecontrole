@@ -239,6 +239,7 @@ export const dbSaveFixedExpenses = async (expenses: FixedExpenses): Promise<void
 
 // Save Competitors
 export const dbSaveCompetitors = async (competitors: CompetitorItem[]): Promise<void> => {
+  if (!competitors || competitors.length === 0) return;
   try {
     await initAuth();
     const batch = writeBatch(db);
@@ -251,6 +252,17 @@ export const dbSaveCompetitors = async (competitors: CompetitorItem[]): Promise<
   } catch (err) {
     console.error('[Firestore] Error saving competitors:', err);
     throw err;
+  }
+};
+
+// Delete a Competitor
+export const dbDeleteCompetitor = async (competitorId: string): Promise<void> => {
+  const path = `competitors/${competitorId}`;
+  try {
+    await initAuth();
+    await deleteDoc(doc(db, 'competitors', competitorId));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, path);
   }
 };
 
@@ -336,7 +348,9 @@ export const dbSeedIfEmpty = async (
       await dbSaveProductsBatch(initialProducts);
       await dbSaveChannels(initialChannels);
       await dbSaveFixedExpenses(initialExpenses);
-      await dbSaveCompetitors(initialCompetitors);
+      if (initialCompetitors.length > 0) {
+        await dbSaveCompetitors(initialCompetitors);
+      }
       return true;
     }
     return false;

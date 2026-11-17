@@ -19,6 +19,7 @@ interface BreakevenShieldedWidgetProps {
   onApplyPrice?: (price: number) => void;
   canEditPrices?: boolean;
   preferredChannelId?: string;
+  isPortfolioMode?: boolean;
 }
 
 export const BreakevenShieldedWidget: React.FC<BreakevenShieldedWidgetProps> = ({
@@ -28,6 +29,7 @@ export const BreakevenShieldedWidget: React.FC<BreakevenShieldedWidgetProps> = (
   onApplyPrice,
   canEditPrices = true,
   preferredChannelId,
+  isPortfolioMode = false,
 }) => {
   const [targetMargin, setTargetMargin] = useState<number>(30); // 30% target margin
   const [selectedChannelId, setSelectedChannelId] = useState<string>(
@@ -67,12 +69,12 @@ export const BreakevenShieldedWidget: React.FC<BreakevenShieldedWidgetProps> = (
             <ShieldCheck className="w-5 h-5" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-base sm:text-lg font-black text-white tracking-tight">
                 Calculadora de Precificação Blindada & Ponto de Equilíbrio
               </h2>
               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                Fórmula Anti-Prejuízo
+                {isPortfolioMode ? 'Média do Catálogo' : 'Fórmula Anti-Prejuízo'}
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
@@ -229,7 +231,7 @@ export const BreakevenShieldedWidget: React.FC<BreakevenShieldedWidgetProps> = (
               </span>
             </div>
 
-            {onApplyPrice && canEditPrices && (
+            {onApplyPrice && canEditPrices && !isPortfolioMode && (
               <button
                 onClick={() => onApplyPrice(shieldedPrice)}
                 className="w-full mt-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-500/20 transition-all"

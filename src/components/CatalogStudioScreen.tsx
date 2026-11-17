@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   Package,
   Layers,
@@ -61,6 +61,8 @@ interface CatalogStudioScreenProps {
   onDeleteProduct: (id: string) => void;
   onBackToDashboard: () => void;
   onBatchImportProducts?: (products: ProductItem[], mode: 'merge' | 'replace') => void;
+  initialEditProductId?: string | null;
+  onConsumeInitialEdit?: () => void;
 }
 
 export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
@@ -75,6 +77,8 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
   onDeleteProduct,
   onBackToDashboard,
   onBatchImportProducts,
+  initialEditProductId,
+  onConsumeInitialEdit,
 }) => {
   // Navigation within Studio: 'list' (Table/Grid) or 'edit' (Dedicated Product & Technical Sheet Studio)
   const [studioMode, setStudioMode] = useState<'list' | 'edit'>('list');
@@ -693,6 +697,15 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     setStudioMode('edit');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+
+  useEffect(() => {
+    if (!initialEditProductId) return;
+    const target = products.find((p) => p.id === initialEditProductId);
+    if (target) {
+      handleStartEditing(target);
+      onConsumeInitialEdit?.();
+    }
+  }, [initialEditProductId, products]);
 
   const handleCancelEditing = () => {
     if (

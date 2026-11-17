@@ -61,8 +61,13 @@ export const PriceMarginEvolutionWidget: React.FC<PriceMarginEvolutionWidgetProp
 
   // 1. Sensibilidade Preditiva: Curva de Custo vs Lucro Líquido
   const sensitivityData = useMemo(() => {
-    const baseCost = product.cost;
-    const currentPrice = product.currentPrice || 9.84;
+    const baseCost = Number(product.cost) || 0;
+    const currentPrice = Number(product.currentPrice) || 0;
+    const targetMargin = Number(product.targetNetMargin) || 0.25;
+    const lowestChannelRate =
+      channels.length > 0
+        ? Math.min(...channels.map((c) => Number(c.totalRate) || 0)) / 100
+        : 0;
     const steps = [-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 35];
 
     return steps.map((variation) => {
@@ -71,17 +76,16 @@ export const PriceMarginEvolutionWidget: React.FC<PriceMarginEvolutionWidgetProp
       // Sem repasse (preço congelado)
       const frozenFee = Number((currentPrice * feeRate).toFixed(2));
       const frozenProfit = Number((currentPrice - simulatedCost - frozenFee).toFixed(2));
-      const frozenMarginPct = Number(((frozenProfit / currentPrice) * 100).toFixed(1));
+      const frozenMarginPct = currentPrice > 0 ? Number(((frozenProfit / currentPrice) * 100).toFixed(1)) : 0;
 
-      // Com repasse preditivo blindado (mantendo margem alvo de 20%)
-      const targetMargin = 0.20;
+      // Com repasse preditivo blindado (mantendo margem alvo configurada do produto)
       const divisor = 1 - targetMargin - feeRate;
       const dynamicPrice = divisor > 0.1 ? Number((simulatedCost / divisor).toFixed(2)) : Number((simulatedCost * 2).toFixed(2));
       const dynamicFee = Number((dynamicPrice * feeRate).toFixed(2));
       const dynamicProfit = Number((dynamicPrice - simulatedCost - dynamicFee).toFixed(2));
 
-      // Lucro no balcão direto (taxa 1%) para comparação
-      const balcaoFee = Number((currentPrice * 0.01).toFixed(2));
+      // Lucro no canal de menor taxa para comparação
+      const balcaoFee = Number((currentPrice * lowestChannelRate).toFixed(2));
       const balcaoProfit = Number((currentPrice - simulatedCost - balcaoFee).toFixed(2));
 
       return {
@@ -98,97 +102,67 @@ export const PriceMarginEvolutionWidget: React.FC<PriceMarginEvolutionWidgetProp
     });
   }, [product.cost, product.currentPrice, feeRate]);
 
-  // 2. Evolução Temporal (Histórico 6 Meses + 3 Meses Preditivos)
+  // 2. Projeção Temporal Real (Mês Atual Real + Próximos Meses sob Inflação Simulada)
   const timelineData = useMemo(() => {
     const baseCost = product.cost;
-    const basePrice = product.currentPrice || 9.84;
+    const basePrice = product.currentPrice || 0;
+    const targetNet = product.targetNetMargin > 0 && product.targetNetMargin < 0.8 ? product.targetNetMargin : 0.25;
+    const now = new Date();
+    const fmtMonth = (offset: number) => {
+      const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+      const raw = d.toLocaleDateString('pt-BR', { month: 'short', year: '2-digit' }).replace('.', '');
+      return raw.charAt(0).toUpperCase() + raw.slice(1);
+    };
 
-    const months = [
-      { month: 'Mai/25', costMult: 0.88, priceMult: 0.92, isProjected: false },
-      { month: 'Jun/25', costMult: 0.90, priceMult: 0.92, isProjected: false },
-      { month: 'Jul/25', costMult: 0.94, priceMult: 0.95, isProjected: false },
-      { month: 'Ago/25', costMult: 0.97, priceMult: 0.98, isProjected: false },
-      { month: 'Set/25', costMult: 0.99, priceMult: 1.00, isProjected: false },
-      { month: 'Out/25 (Atual)', costMult: 1.00, priceMult: 1.00, isProjected: false },
-      { month: 'Nov/25 (Proj)', costMult: 1.04 + (inflationRate / 100), priceMult: enableDynamicRepricing ? 1.06 + (inflationRate / 100) : 1.00, isProjected: true },
-      { month: 'Dez/25 (Proj)', costMult: 1.08 + (inflationRate / 100) * 1.2, priceMult: enableDynamicRepricing ? 1.11 + (inflationRate / 100) * 1.2 : 1.00, isProjected: true },
-      { month: 'Jan/26 (Proj)', costMult: 1.12 + (inflationRate / 100) * 1.4, priceMult: enableDynamicRepricing ? 1.16 + (inflationRate / 100) * 1.4 : 1.00, isProjected: true },
-    ];
+    const steps = [0, 1, 2, 3, 4, 5];
 
-    return months.map((m) => {
-      const monthCost = Number((baseCost * m.costMult).toFixed(2));
-      const monthPrice = Number((basePrice * m.priceMult).toFixed(2));
+    return steps.map((offset) => {
+      const inflationStep = (inflationRate / 100) * (offset / 5);
+      const monthCost = Number((baseCost * (1 + inflationStep)).toFixed(2));
+      const shieldDivisor = 1 - targetNet - feeRate;
+      const monthPrice =
+        offset === 0
+          ? Number(basePrice.toFixed(2))
+          : enableDynamicRepricing && shieldDivisor > 0.05
+          ? Number((monthCost / shieldDivisor).toFixed(2))
+          : Number(basePrice.toFixed(2));
       const monthFee = Number((monthPrice * feeRate).toFixed(2));
       const netProfit = Number((monthPrice - monthCost - monthFee).toFixed(2));
-      const netMarginPct = Number(((netProfit / monthPrice) * 100).toFixed(1));
+      const netMarginPct = monthPrice > 0 ? Number(((netProfit / monthPrice) * 100).toFixed(1)) : 0;
 
       return {
-        month: m.month,
+        month: offset === 0 ? `${fmtMonth(0)} (Atual)` : `${fmtMonth(offset)} (Proj.)`,
         custo: monthCost,
         preco: monthPrice,
         taxaApp: monthFee,
         lucroLiquido: netProfit,
         margemPct: netMarginPct,
-        isProjected: m.isProjected,
+        isProjected: offset > 0,
       };
     });
-  }, [product.cost, product.currentPrice, feeRate, inflationRate, enableDynamicRepricing]);
+  }, [product.cost, product.currentPrice, product.targetNetMargin, feeRate, inflationRate, enableDynamicRepricing]);
 
-  // Indicadores de Alerta Preditivo
-  const currentItem = timelineData.find((d) => !d.isProjected && d.month.includes('Atual')) || timelineData[5];
+  // Indicadores reais do mês atual vs último mês projetado
+  const currentItem = timelineData[0];
   const lastProjectedItem = timelineData[timelineData.length - 1];
-  const marginDelta = lastProjectedItem.margemPct - currentItem.margemPct;
+  const marginDelta = Number((lastProjectedItem.margemPct - currentItem.margemPct).toFixed(1));
 
   // Custo teto antes de ter prejuízo
-  const currentPrice = product.currentPrice || 9.84;
+  const currentPrice = product.currentPrice || 0;
   const breakEvenCost = Number((currentPrice * (1 - feeRate)).toFixed(2));
   const costRoomBrl = Number((breakEvenCost - product.cost).toFixed(2));
-  const costRoomPct = Number(((costRoomBrl / product.cost) * 100).toFixed(1));
+  const costRoomPct = product.cost > 0 ? Number(((costRoomBrl / product.cost) * 100).toFixed(1)) : 0;
 
-  // Evolução Diária comparada ao dia anterior (D-1)
-  const dailyEvolution = useMemo(() => {
-    const hashSeed = product.id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-
-    // Preço diário: variação +1.8% a +2.8%
-    const priceDeltaPct = Number((((hashSeed % 5) - 1) * 0.5 + 1.8).toFixed(1));
-    const prevPrice = Number((currentPrice / (1 + priceDeltaPct / 100)).toFixed(2));
-
-    // Teto de Custo diário: variação +0.8%
-    const ceilingDeltaPct = Number((((hashSeed % 7) - 2) * 0.3 + 0.8).toFixed(1));
-    const prevCeiling = Number((breakEvenCost / (1 + ceilingDeltaPct / 100)).toFixed(2));
-
-    // Lucro Líquido no Canal diário: variação +3.5%
-    const currentProfit = currentItem.lucroLiquido;
-    const profitDeltaPct = Number((((hashSeed % 9) - 3) * 0.6 + 3.2).toFixed(1));
-    const prevProfit = Number((currentProfit / (1 + profitDeltaPct / 100)).toFixed(2));
-
-    // Margem real diária: variação +1.2%
-    const marginDeltaPct = Number((((hashSeed % 4) - 1) * 0.4 + 1.0).toFixed(1));
-    const prevMargin = Number((currentItem.margemPct - marginDeltaPct).toFixed(1));
-
-    return {
-      price: {
-        deltaPct: priceDeltaPct,
-        prev: prevPrice,
-        isPositive: priceDeltaPct >= 0,
-      },
-      ceiling: {
-        deltaPct: ceilingDeltaPct,
-        prev: prevCeiling,
-        isPositive: ceilingDeltaPct >= 0,
-      },
-      profit: {
-        deltaPct: profitDeltaPct,
-        prev: prevProfit,
-        isPositive: profitDeltaPct >= 0,
-      },
-      margin: {
-        deltaPct: marginDeltaPct,
-        prev: prevMargin,
-        isPositive: marginDeltaPct >= 0,
-      },
-    };
-  }, [product.id, currentPrice, breakEvenCost, currentItem]);
+  // Referências reais (sem dados fictícios de "Ontem")
+  const targetNetMarginPct = Number(((product.targetNetMargin || 0.25) * 100).toFixed(1));
+  const shieldDivisor = 1 - (product.targetNetMargin || 0.25) - feeRate;
+  const recommendedShieldPrice =
+    shieldDivisor > 0.05 ? Number((product.cost / shieldDivisor).toFixed(2)) : Number((product.cost * 2).toFixed(2));
+  const priceGapPct =
+    recommendedShieldPrice > 0
+      ? Number((((currentPrice - recommendedShieldPrice) / recommendedShieldPrice) * 100).toFixed(1))
+      : 0;
+  const marginGapPct = Number((currentItem.margemPct - targetNetMarginPct).toFixed(1));
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xl relative overflow-hidden">
@@ -257,41 +231,39 @@ export const PriceMarginEvolutionWidget: React.FC<PriceMarginEvolutionWidgetProp
         </div>
       </div>
 
-      {/* Cartões de Métricas com Indicadores de Tendência Diária (vs. Dia Anterior) */}
+      {/* Cartões de Métricas Reais no Canal Selecionado */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 my-5">
-        {/* Card 1: Preço Vigente */}
+        {/* Card 1: Preço Vigente vs Blindado */}
         <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800 hover:border-slate-700/80 transition-all shadow-md group">
           <div className="flex items-center justify-between">
             <span className="text-[10px] text-slate-400 uppercase font-semibold">Preço Vigente</span>
             <div
               className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                dailyEvolution.price.isPositive
+                priceGapPct >= 0
                   ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                  : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+                  : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
               }`}
-              title="Evolução diária comparada ao dia anterior"
+              title="Diferença do preço atual em relação ao Preço Blindado para a meta"
             >
-              {dailyEvolution.price.isPositive ? (
+              {priceGapPct >= 0 ? (
                 <TrendingUp className="w-3 h-3 text-emerald-400" />
               ) : (
-                <TrendingDown className="w-3 h-3 text-rose-400" />
+                <TrendingDown className="w-3 h-3 text-amber-300" />
               )}
               <span>
-                {dailyEvolution.price.deltaPct >= 0
-                  ? `+${dailyEvolution.price.deltaPct}%`
-                  : `${dailyEvolution.price.deltaPct}%`}
+                {priceGapPct >= 0 ? `+${priceGapPct}%` : `${priceGapPct}%`}
               </span>
             </div>
           </div>
           <div className="text-base font-mono font-bold text-white mt-1.5 flex items-baseline justify-between">
             <span>{formatBRL(currentPrice)}</span>
             <span className="text-[10px] text-slate-400 font-mono">
-              Ontem: {formatBRL(dailyEvolution.price.prev)}
+              Blindado: {formatBRL(recommendedShieldPrice)}
             </span>
           </div>
           <div className="text-[10px] text-slate-400 mt-1.5 pt-1.5 border-t border-slate-800/60 flex items-center justify-between">
             <span>Custo CMV: {formatBRL(product.cost)}</span>
-            <span className="text-[9px] text-slate-400">vs. dia anterior</span>
+            <span className="text-[9px] text-slate-400">vs. ideal ({targetNetMarginPct}%)</span>
           </div>
         </div>
 
@@ -301,33 +273,24 @@ export const PriceMarginEvolutionWidget: React.FC<PriceMarginEvolutionWidgetProp
             <span className="text-[10px] text-slate-400 uppercase font-semibold">Teto Máximo de Custo</span>
             <div
               className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                dailyEvolution.ceiling.isPositive
+                costRoomBrl >= 0
                   ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
                   : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
               }`}
-              title="Evolução diária do teto comparada ao dia anterior"
+              title="Folga máxima de aumento de insumo antes de dar prejuízo"
             >
-              {dailyEvolution.ceiling.isPositive ? (
-                <TrendingUp className="w-3 h-3 text-emerald-400" />
-              ) : (
-                <TrendingDown className="w-3 h-3 text-rose-400" />
-              )}
-              <span>
-                {dailyEvolution.ceiling.deltaPct >= 0
-                  ? `+${dailyEvolution.ceiling.deltaPct}%`
-                  : `${dailyEvolution.ceiling.deltaPct}%`}
-              </span>
+              <span>{costRoomPct >= 0 ? `+${costRoomPct}%` : `${costRoomPct}%`}</span>
             </div>
           </div>
           <div className="text-base font-mono font-bold text-amber-400 mt-1.5 flex items-baseline justify-between">
             <span>{formatBRL(breakEvenCost)}</span>
             <span className="text-[10px] text-slate-400 font-mono">
-              Ontem: {formatBRL(dailyEvolution.ceiling.prev)}
+              Limite ponto zero
             </span>
           </div>
           <div className="text-[10px] text-slate-400 mt-1.5 pt-1.5 border-t border-slate-800/60 flex items-center justify-between">
-            <span>Folga: <strong className="text-emerald-400">+{costRoomPct}% ({formatBRL(costRoomBrl)})</strong></span>
-            <span className="text-[9px] text-slate-400">vs. dia anterior</span>
+            <span>Folga: <strong className={costRoomBrl >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{formatBRL(costRoomBrl)}</strong></span>
+            <span className="text-[9px] text-slate-400">margem de segurança</span>
           </div>
         </div>
 
@@ -335,71 +298,48 @@ export const PriceMarginEvolutionWidget: React.FC<PriceMarginEvolutionWidgetProp
         <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800 hover:border-slate-700/80 transition-all shadow-md group">
           <div className="flex items-center justify-between">
             <span className="text-[10px] text-slate-400 uppercase font-semibold">Lucro Líquido no Canal</span>
-            <div
-              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                dailyEvolution.profit.isPositive
-                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                  : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
-              }`}
-              title="Evolução diária do lucro comparada ao dia anterior"
-            >
-              {dailyEvolution.profit.isPositive ? (
-                <TrendingUp className="w-3 h-3 text-emerald-400" />
-              ) : (
-                <TrendingDown className="w-3 h-3 text-rose-400" />
-              )}
-              <span>
-                {dailyEvolution.profit.deltaPct >= 0
-                  ? `+${dailyEvolution.profit.deltaPct}%`
-                  : `${dailyEvolution.profit.deltaPct}%`}
-              </span>
-            </div>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-rose-500/15 text-rose-300 border-rose-500/30 font-mono">
+              Taxa -{formatBRL(currentItem.taxaApp)}
+            </span>
           </div>
           <div className="text-base font-mono font-bold text-emerald-400 mt-1.5 flex items-baseline justify-between">
-            <span>{formatBRL(currentItem.lucroLiquido)}</span>
+            <span className={currentItem.lucroLiquido >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+              {formatBRL(currentItem.lucroLiquido)}
+            </span>
             <span className="text-[10px] text-slate-400 font-mono">
-              Ontem: {formatBRL(dailyEvolution.profit.prev)}
+              Taxa {activeChannel.totalRate}%
             </span>
           </div>
           <div className="text-[10px] text-slate-400 mt-1.5 pt-1.5 border-t border-slate-800/60 flex items-center justify-between">
             <span>Margem Real: <strong className="text-cyan-300">{formatPercent(currentItem.margemPct)}</strong></span>
-            <span className="text-[9px] text-slate-400">vs. dia anterior</span>
+            <span className="text-[9px] text-slate-400 truncate max-w-[100px]">{activeChannel.platformName}</span>
           </div>
         </div>
 
-        {/* Card 4: Margem Real & Tendência */}
+        {/* Card 4: Margem Real vs Projeção */}
         <div className="p-3.5 rounded-2xl bg-gradient-to-br from-cyan-950/30 to-slate-950 border border-cyan-500/30 hover:border-cyan-500/50 transition-all shadow-md group">
           <div className="flex items-center justify-between">
-            <span className="text-[10px] text-cyan-400 uppercase font-semibold">Margem & Tendência</span>
+            <span className="text-[10px] text-cyan-400 uppercase font-semibold">Margem vs Meta Alvo</span>
             <div
               className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                dailyEvolution.margin.isPositive
+                marginGapPct >= 0
                   ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
                   : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
               }`}
-              title="Evolução diária de margem comparada ao dia anterior"
+              title="Diferença entre a margem real atual e a meta do produto"
             >
-              {dailyEvolution.margin.isPositive ? (
-                <TrendingUp className="w-3 h-3 text-emerald-400" />
-              ) : (
-                <TrendingDown className="w-3 h-3 text-rose-400" />
-              )}
-              <span>
-                {dailyEvolution.margin.deltaPct >= 0
-                  ? `+${dailyEvolution.margin.deltaPct}%`
-                  : `${dailyEvolution.margin.deltaPct}%`}
-              </span>
+              <span>{marginGapPct >= 0 ? `+${marginGapPct}pp` : `${marginGapPct}pp`}</span>
             </div>
           </div>
           <div className="text-base font-mono font-bold text-white mt-1.5 flex items-baseline justify-between">
             <span>{formatPercent(currentItem.margemPct)}</span>
             <span className="text-[10px] text-slate-400 font-mono">
-              Ontem: {dailyEvolution.margin.prev.toFixed(1)}%
+              Meta: {targetNetMarginPct}%
             </span>
           </div>
           <div className="text-[10px] text-slate-400 mt-1.5 pt-1.5 border-t border-cyan-500/20 flex items-center justify-between">
-            <span>Proj. Jan/26: <strong className="text-cyan-300">{formatPercent(lastProjectedItem.margemPct)}</strong></span>
-            <span className="text-[9px] text-slate-400">vs. dia anterior</span>
+            <span>Proj. {lastProjectedItem.month.split(' ')[0]}: <strong className="text-cyan-300">{formatPercent(lastProjectedItem.margemPct)}</strong></span>
+            <span className="text-[9px] text-slate-400">{marginDelta >= 0 ? `+${marginDelta}pp` : `${marginDelta}pp`}</span>
           </div>
         </div>
       </div>
@@ -454,7 +394,7 @@ export const PriceMarginEvolutionWidget: React.FC<PriceMarginEvolutionWidgetProp
             <span>
               {activeTab === 'sensitivity'
                 ? `Sensibilidade do Lucro Líquido Real vs Custo de Insumos (${activeChannel.name})`
-                : `Tendência Temporal de Preço, Custos e Margem (Últimos 6 Meses + 3 Meses Preditivos)`}
+                : `Mês Atual Real + Projeção de 5 Meses sob Inflação (+${inflationRate}%)`}
             </span>
           </div>
 

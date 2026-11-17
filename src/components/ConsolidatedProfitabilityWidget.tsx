@@ -60,11 +60,12 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
   // Active channel determination
   const effectiveChannelRate = useMemo(() => {
     if (selectedChannelId === 'weighted') {
-      // Calculate weighted average of delivery/counter channels (typical mix: 40% Uai, 30% iFood, 15% Tchau Fome, 15% Balcão)
-      return 15.5; // Benchmark médio ponderado delivery
+      if (!channels || channels.length === 0) return 0;
+      const sum = channels.reduce((acc, ch) => acc + (Number(ch.totalRate) || 0), 0);
+      return Number((sum / channels.length).toFixed(2));
     }
     const found = channels.find((c) => c.id === selectedChannelId);
-    return found ? found.totalRate : 17.49;
+    return found ? found.totalRate : (channels[0]?.totalRate ?? 0);
   }, [selectedChannelId, channels]);
 
   // Filter products by active state if requested
@@ -123,7 +124,7 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
       const unitFee = unitPrice * feeRate;
       const unitNetProfit = unitPrice - unitCost - unitFee;
       const unitNetMarginPercent = unitPrice > 0 ? (unitNetProfit / unitPrice) * 100 : 0;
-      const monthlyUnits = p.estimatedMonthlyUnits && p.estimatedMonthlyUnits > 0 ? p.estimatedMonthlyUnits : 200;
+      const monthlyUnits = Math.max(0, Number(p.estimatedMonthlyUnits) || 0);
 
       const monthlyRevenue = unitPrice * monthlyUnits;
       const monthlyCost = unitCost * monthlyUnits;
@@ -250,38 +251,25 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
     }));
   }, [categoryAnalytics]);
 
-  // Evolução Diária consolidada comparada ao dia anterior (D-1)
-  const dailyEvolution = useMemo(() => {
-    const profitDeltaPct = 3.4;
-    const prevProfit = categoryAnalytics.companyNetProfit / (1 + profitDeltaPct / 100);
+  const lowestFeeChannel = useMemo(() => {
+    if (!channels || channels.length === 0) return null;
+    return [...channels].sort((a, b) => a.totalRate - b.totalRate)[0];
+  }, [channels]);
 
-    const revenueDeltaPct = 2.8;
-    const prevRevenue = categoryAnalytics.companyRevenue / (1 + revenueDeltaPct / 100);
+  const directChannelSavingsBRL = useMemo(() => {
+    const lowestRate = (lowestFeeChannel?.totalRate || 0) / 100;
+    const lowestFeeCost = categoryAnalytics.companyRevenue * lowestRate;
+    return Math.max(0, categoryAnalytics.companyFees - lowestFeeCost);
+  }, [categoryAnalytics.companyFees, categoryAnalytics.companyRevenue, lowestFeeChannel]);
 
-    const pillarDeltaPct = 1.7;
-    const marginDeltaPct = 0.9;
-
-    return {
-      profit: {
-        deltaPct: profitDeltaPct,
-        prev: prevProfit,
-        isPositive: profitDeltaPct >= 0,
-      },
-      revenue: {
-        deltaPct: revenueDeltaPct,
-        prev: prevRevenue,
-        isPositive: revenueDeltaPct >= 0,
-      },
-      pillar: {
-        deltaPct: pillarDeltaPct,
-        isPositive: pillarDeltaPct >= 0,
-      },
-      margin: {
-        deltaPct: marginDeltaPct,
-        isPositive: marginDeltaPct >= 0,
-      },
-    };
-  }, [categoryAnalytics]);
+  const avgUnitProfit =
+    categoryAnalytics.companyUnits > 0
+      ? categoryAnalytics.companyNetProfit / categoryAnalytics.companyUnits
+      : 0;
+  const avgTicket =
+    categoryAnalytics.companyUnits > 0
+      ? categoryAnalytics.companyRevenue / categoryAnalytics.companyUnits
+      : 0;
 
   // Category Color Palette
   const getCategoryColor = (index: number) => {
@@ -332,7 +320,7 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
               className="bg-transparent text-slate-200 font-semibold focus:outline-none cursor-pointer"
             >
               <option value="weighted" className="bg-slate-900 text-slate-100">
-                Média Ponderada Delivery (15.5%)
+                Média Geral dos Canais ({effectiveChannelRate.toFixed(2).replace('.', ',')}%)
               </option>
               {channels.map((ch) => (
                 <option key={ch.id} value={ch.id} className="bg-slate-900 text-slate-100">
@@ -370,7 +358,7 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
         </div>
       </div>
 
-      {/* 4 EXECUTIVE KPI SUMMARY CARDS COM EVOLUÇÃO DIÁRIA (VS. DIA ANTERIOR) */}
+      {/* 4 EXECUTIVE KPI SUMMARY CARDS COM DADOS REAIS DO CATÁLOGO */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         {/* KPI 1: Lucro Líquido Total Consolidado */}
         <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-emerald-950/40 via-slate-900 to-slate-950 border border-emerald-500/30 shadow-lg relative overflow-hidden group">
@@ -378,24 +366,9 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
             <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
               Lucro Líquido Consolidado
             </span>
-            <div
-              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                dailyEvolution.profit.isPositive
-                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                  : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-              }`}
-              title="Evolução diária comparada ao dia anterior"
-            >
-              {dailyEvolution.profit.isPositive ? (
-                <TrendingUp className="w-3 h-3 text-emerald-400" />
-              ) : (
-                <TrendingDown className="w-3 h-3 text-rose-400" />
-              )}
-              <span>
-                {dailyEvolution.profit.deltaPct >= 0
-                  ? `+${dailyEvolution.profit.deltaPct}%`
-                  : `${dailyEvolution.profit.deltaPct}%`}
-              </span>
+            <div className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-emerald-500/20 text-emerald-300 border-emerald-500/40">
+              <TrendingUp className="w-3 h-3 text-emerald-400" />
+              <span>{filteredProducts.length} {filteredProducts.length === 1 ? 'item' : 'itens'}</span>
             </div>
           </div>
           <div className="mt-2 flex items-baseline justify-between">
@@ -406,7 +379,7 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
               <span className="text-xs text-slate-400 block mt-0.5">/mês projetado</span>
             </div>
             <span className="text-[10px] text-slate-400 font-mono">
-              Ontem: {formatBRL(dailyEvolution.profit.prev)}
+              Lucro/un: {formatBRL(avgUnitProfit)}
             </span>
           </div>
           <div className="mt-3 pt-2.5 border-t border-emerald-500/20 flex items-center justify-between text-[11px]">
@@ -423,24 +396,8 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
             <span className="text-[11px] font-bold uppercase tracking-wider text-cyan-400">
               Faturamento Bruto Mensal
             </span>
-            <div
-              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                dailyEvolution.revenue.isPositive
-                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
-                  : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-              }`}
-              title="Evolução diária comparada ao dia anterior"
-            >
-              {dailyEvolution.revenue.isPositive ? (
-                <TrendingUp className="w-3 h-3 text-cyan-400" />
-              ) : (
-                <TrendingDown className="w-3 h-3 text-rose-400" />
-              )}
-              <span>
-                {dailyEvolution.revenue.deltaPct >= 0
-                  ? `+${dailyEvolution.revenue.deltaPct}%`
-                  : `${dailyEvolution.revenue.deltaPct}%`}
-              </span>
+            <div className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-cyan-500/20 text-cyan-300 border-cyan-500/40">
+              <span>Taxa {effectiveChannelRate.toFixed(1)}%</span>
             </div>
           </div>
           <div className="mt-2 flex items-baseline justify-between">
@@ -453,7 +410,7 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
               </span>
             </div>
             <span className="text-[10px] text-slate-400 font-mono">
-              Ontem: {formatBRL(dailyEvolution.revenue.prev)}
+              Ticket: {formatBRL(avgTicket)}
             </span>
           </div>
           <div className="mt-3 pt-2.5 border-t border-cyan-500/20 flex items-center justify-between text-[11px]">
@@ -470,23 +427,11 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
             <span className="text-[11px] font-bold uppercase tracking-wider text-violet-400">
               Categoria Pilar (Sustentáculo)
             </span>
-            <div
-              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                dailyEvolution.pillar.isPositive
-                  ? 'bg-violet-500/20 text-violet-300 border-violet-500/40'
-                  : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-              }`}
-              title="Evolução diária comparada ao dia anterior"
-            >
-              {dailyEvolution.pillar.isPositive ? (
-                <TrendingUp className="w-3 h-3 text-violet-400" />
-              ) : (
-                <TrendingDown className="w-3 h-3 text-rose-400" />
-              )}
+            <div className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-violet-500/20 text-violet-300 border-violet-500/40">
               <span>
-                {dailyEvolution.pillar.deltaPct >= 0
-                  ? `+${dailyEvolution.pillar.deltaPct}%`
-                  : `${dailyEvolution.pillar.deltaPct}%`}
+                {categoryAnalytics.pillarCategory
+                  ? `${categoryAnalytics.pillarCategory.revenueSharePercent.toFixed(0)}% receita`
+                  : '-'}
               </span>
             </div>
           </div>
@@ -514,23 +459,13 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
             <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
               Maior Margem Líquida %
             </span>
-            <div
-              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                dailyEvolution.margin.isPositive
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                  : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-              }`}
-              title="Evolução diária comparada ao dia anterior"
-            >
-              {dailyEvolution.margin.isPositive ? (
-                <TrendingUp className="w-3 h-3 text-amber-400" />
-              ) : (
-                <TrendingDown className="w-3 h-3 text-rose-400" />
-              )}
+            <div className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-amber-500/20 text-amber-300 border-amber-500/40">
               <span>
-                {dailyEvolution.margin.deltaPct >= 0
-                  ? `+${dailyEvolution.margin.deltaPct}%`
-                  : `${dailyEvolution.margin.deltaPct}%`}
+                {categoryAnalytics.highestMarginCategory
+                  ? `${categoryAnalytics.highestMarginCategory.productCount} ${
+                      categoryAnalytics.highestMarginCategory.productCount === 1 ? 'item' : 'itens'
+                    }`
+                  : '-'}
               </span>
             </div>
           </div>
@@ -547,7 +482,7 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
           <div className="mt-3 pt-2.5 border-t border-amber-500/20 flex items-center justify-between text-[11px]">
             <span className="text-slate-400 font-medium">Produto Campeão:</span>
             <span className="font-medium text-amber-200 truncate max-w-[130px]" title={categoryAnalytics.championProductName || '-'}>
-              {categoryAnalytics.championProductName?.split(' ')[0] || '-'}
+              {categoryAnalytics.championProductName || '-'}
             </span>
           </div>
         </div>
@@ -831,7 +766,9 @@ export const ConsolidatedProfitabilityWidget: React.FC<ConsolidatedProfitability
               <span>Mitigação de Comissões ({effectiveChannelRate}%)</span>
             </div>
             <p className="text-slate-300 leading-relaxed">
-              Taxas de delivery consomem <strong className="text-cyan-300">{formatBRL(categoryAnalytics.companyFees)}/mês</strong> do faturamento bruto. Direcionar clientes para o canal próprio/Pix no balcão recupera até R$ {(categoryAnalytics.companyFees * 0.8).toFixed(2)} em margem pura.
+              Taxas deste canal consomem <strong className="text-cyan-300">{formatBRL(categoryAnalytics.companyFees)}/mês</strong> do faturamento bruto. Migrar pedidos para{' '}
+              <strong className="text-white">{lowestFeeChannel?.name || 'canal direto'}</strong> ({lowestFeeChannel?.totalRate ?? 0}%) recupera até{' '}
+              <strong className="text-emerald-300">{formatBRL(directChannelSavingsBRL)}/mês</strong> em margem líquida real.
             </p>
           </div>
         </div>

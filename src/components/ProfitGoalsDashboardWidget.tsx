@@ -25,6 +25,8 @@ import { formatBRL, formatPercent } from '../utils/pricingEngine';
 
 interface ProfitGoalsDashboardWidgetProps {
   product: ProductItem;
+  products?: ProductItem[];
+  isPortfolioMode?: boolean;
   fixedExpenses: FixedExpenses;
   channels: ChannelFee[];
   preferredChannelId?: string;
@@ -32,18 +34,12 @@ interface ProfitGoalsDashboardWidgetProps {
 
 export const ProfitGoalsDashboardWidget: React.FC<ProfitGoalsDashboardWidgetProps> = ({
   product,
+  products = [],
+  isPortfolioMode = false,
   fixedExpenses,
   channels,
   preferredChannelId,
 }) => {
-  // Goal parameters (stored in local state with user configurability)
-  const [revenueGoal, setRevenueGoal] = useState<number>(18000.0);
-  const [profitGoal, setProfitGoal] = useState<number>(4500.0);
-  const [currentDayOfMonth, setCurrentDayOfMonth] = useState<number>(18);
-  const totalDaysInMonth = 30;
-
-  // Realized performance parameters
-  const [realizedUnitsSold, setRealizedUnitsSold] = useState<number>(275);
   const [selectedChannelId, setSelectedChannelId] = useState<string>(
     preferredChannelId || product.referenceChannelId || channels[0]?.id || 'uai-online'
   );
@@ -56,13 +52,102 @@ export const ProfitGoalsDashboardWidget: React.FC<ProfitGoalsDashboardWidgetProp
   }, [preferredChannelId, product.id, product.referenceChannelId, channels]);
 
   const activeChannel = channels.find((c) => c.id === selectedChannelId) || channels[0];
-  const feeRate = activeChannel.totalRate / 100;
-  const currentPrice = product.currentPrice || 9.84;
+  const feeRate = (activeChannel?.totalRate || 0) / 100;
+  const activePortfolio = products.filter((p) => p.active !== false);
+  const portfolioList = activePortfolio.length > 0 ? activePortfolio : products;
+  const usePortfolioAggregate = isPortfolioMode && portfolioList.length > 0;
+
+  // Real current calendar day & total days in current month
+  const nowDate = new Date();
+  const realCurrentDay = nowDate.getDate();
+  const totalDaysInMonth = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 0).getDate();
+
+  // Weighted average ticket & profit across entire catalog when in portfolio mode (zero fallbacks)
+  const portfolioTotalUnits = usePortfolioAggregate
+    ? portfolioList.reduce((acc, p) => acc + Math.max(0, Number(p.estimatedMonthlyUnits) || 0), 0)
+    : Math.max(0, Number(product.estimatedMonthlyUnits) || 0);
+
+  const portfolioTotalRev = usePortfolioAggregate
+    ? portfolioList.reduce((acc, p) => {
+        const u = Math.max(0, Number(p.estimatedMonthlyUnits) || 0);
+        return acc + (Number(p.currentPrice) || 0) * u;
+      }, 0)
+    : (Number(product.currentPrice) || 0) * portfolioTotalUnits;
+
+  const portfolioTotalNetProfit = usePortfolioAggregate
+    ? portfolioList.reduce((acc, p) => {
+        const u = Math.max(0, Number(p.estimatedMonthlyUnits) || 0);
+        const pPrice = Number(p.currentPrice) || 0;
+        const pFee = Number((pPrice * feeRate).toFixed(2));
+        return acc + (pPrice - (Number(p.cost) || 0) - pFee) * u;
+      }, 0)
+    : (() => {
+        const pPrice = Number(product.currentPrice) || 0;
+        const pFee = Number((pPrice * feeRate).toFixed(2));
+        return (pPrice - (Number(product.cost) || 0) - pFee) * portfolioTotalUnits;
+      })();
+
+  const catalogDefaultRevenueGoal = Number(portfolioTotalRev.toFixed(2));
+  const catalogDefaultProfitGoal = Number(
+    (portfolioTotalNetProfit > 0 ? portfolioTotalNetProfit : fixedExpenses.profitProjection || 0).toFixed(2)
+  );
+  const catalogDefaultRealizedUnits = Math.round((portfolioTotalUnits * realCurrentDay) / totalDaysInMonth);
+
+  // User-customizable goals persisted in localStorage, defaulting to real catalog/calendar metrics
+  const [goalOverrides, setGoalOverrides] = useState<{
+    revenueGoal?: number;
+    profitGoal?: number;
+    realizedUnitsSold?: number;
+    currentDayOfMonth?: number;
+  }>(() => {
+    try {
+      const saved = localStorage.getItem('omniprice_profit_goals_config');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('omniprice_profit_goals_config', JSON.stringify(goalOverrides));
+    } catch {
+      // Ignore storage errors
+    }
+  }, [goalOverrides]);
+
+  const revenueGoal = goalOverrides.revenueGoal ?? catalogDefaultRevenueGoal;
+  const profitGoal = goalOverrides.profitGoal ?? catalogDefaultProfitGoal;
+  const realizedUnitsSold = goalOverrides.realizedUnitsSold ?? catalogDefaultRealizedUnits;
+  const currentDayOfMonth = goalOverrides.currentDayOfMonth ?? realCurrentDay;
+
+  const currentPrice = usePortfolioAggregate
+    ? portfolioTotalUnits > 0
+      ? Number((portfolioTotalRev / portfolioTotalUnits).toFixed(2))
+      : Number(
+          (
+            portfolioList.reduce((acc, p) => acc + (Number(p.currentPrice) || 0), 0) /
+            Math.max(1, portfolioList.length)
+          ).toFixed(2)
+        )
+    : Number(product.currentPrice) || 0;
 
   // Realized Financials
   const realizedRevenue = Number((realizedUnitsSold * currentPrice).toFixed(2));
   const unitFee = Number((currentPrice * feeRate).toFixed(2));
-  const unitNetProfit = Number((currentPrice - product.cost - unitFee).toFixed(2));
+  const unitNetProfit = usePortfolioAggregate
+    ? portfolioTotalUnits > 0
+      ? Number((portfolioTotalNetProfit / portfolioTotalUnits).toFixed(2))
+      : Number(
+          (
+            portfolioList.reduce((acc, p) => {
+              const pPrice = Number(p.currentPrice) || 0;
+              const pFee = Number((pPrice * feeRate).toFixed(2));
+              return acc + (pPrice - (Number(p.cost) || 0) - pFee);
+            }, 0) / Math.max(1, portfolioList.length)
+          ).toFixed(2)
+        )
+    : Number((currentPrice - (Number(product.cost) || 0) - unitFee).toFixed(2));
   const realizedNetProfit = Number((realizedUnitsSold * unitNetProfit).toFixed(2));
 
   // Goal Progress
@@ -114,16 +199,18 @@ export const ProfitGoalsDashboardWidget: React.FC<ProfitGoalsDashboardWidgetProp
             <Target className="w-5 h-5" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-base font-bold text-white tracking-tight">
                 Dashboard de Metas de Lucro & Velocímetro de Metas
               </h2>
               <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                Progresso Mensal
+                {usePortfolioAggregate ? `Catálogo Completo (${portfolioList.length} itens)` : 'Progresso Mensal'}
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              Acompanhamento do lucro acumulado real versus a meta estipulada com projeção de fechamento.
+              {usePortfolioAggregate
+                ? 'Acompanhamento consolidado sobre o mix ponderado de todo o catálogo ativo.'
+                : 'Acompanhamento do lucro acumulado real versus a meta estipulada com projeção de fechamento.'}
             </p>
           </div>
         </div>
@@ -154,9 +241,15 @@ export const ProfitGoalsDashboardWidget: React.FC<ProfitGoalsDashboardWidgetProp
             </label>
             <input
               type="number"
-              step="500"
+              step="100"
+              min="0"
               value={revenueGoal}
-              onChange={(e) => setRevenueGoal(parseFloat(e.target.value) || 0)}
+              onChange={(e) =>
+                setGoalOverrides((prev) => ({
+                  ...prev,
+                  revenueGoal: parseFloat(e.target.value) || 0,
+                }))
+              }
               className="w-32 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono font-bold focus:outline-none focus:border-emerald-500"
             />
           </div>
@@ -167,9 +260,15 @@ export const ProfitGoalsDashboardWidget: React.FC<ProfitGoalsDashboardWidgetProp
             </label>
             <input
               type="number"
-              step="200"
+              step="50"
+              min="0"
               value={profitGoal}
-              onChange={(e) => setProfitGoal(parseFloat(e.target.value) || 0)}
+              onChange={(e) =>
+                setGoalOverrides((prev) => ({
+                  ...prev,
+                  profitGoal: parseFloat(e.target.value) || 0,
+                }))
+              }
               className="w-32 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-emerald-400 font-mono font-bold focus:outline-none focus:border-emerald-500"
             />
           </div>
@@ -180,33 +279,56 @@ export const ProfitGoalsDashboardWidget: React.FC<ProfitGoalsDashboardWidgetProp
             </label>
             <input
               type="number"
-              step="10"
+              step="1"
+              min="0"
               value={realizedUnitsSold}
-              onChange={(e) => setRealizedUnitsSold(parseInt(e.target.value) || 0)}
+              onChange={(e) =>
+                setGoalOverrides((prev) => ({
+                  ...prev,
+                  realizedUnitsSold: Math.max(0, parseInt(e.target.value, 10) || 0),
+                }))
+              }
               className="w-28 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-cyan-300 font-mono font-bold focus:outline-none focus:border-emerald-500"
             />
           </div>
 
           <div>
             <label className="text-[10px] text-slate-400 uppercase font-semibold block mb-1">
-              Dia Vigente do Mês (1-30)
+              Dia Vigente do Mês (1-{totalDaysInMonth})
             </label>
             <input
               type="number"
               min="1"
-              max="30"
+              max={totalDaysInMonth}
               value={currentDayOfMonth}
-              onChange={(e) => setCurrentDayOfMonth(Math.min(30, Math.max(1, parseInt(e.target.value) || 1)))}
+              onChange={(e) =>
+                setGoalOverrides((prev) => ({
+                  ...prev,
+                  currentDayOfMonth: Math.min(totalDaysInMonth, Math.max(1, parseInt(e.target.value, 10) || 1)),
+                }))
+              }
               className="w-20 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono text-center focus:outline-none focus:border-emerald-500"
             />
           </div>
         </div>
 
-        <div className="text-right">
-          <span className="text-[10px] text-slate-400 uppercase font-semibold block">Tempo Decorrido</span>
-          <span className="font-mono text-xs text-white">
-            Dia {currentDayOfMonth} de {totalDaysInMonth} ({expectedProgressByToday.toFixed(0)}% do mês)
-          </span>
+        <div className="flex items-center gap-3 ml-auto">
+          {Object.keys(goalOverrides).length > 0 && (
+            <button
+              type="button"
+              onClick={() => setGoalOverrides({})}
+              className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-500/30 text-[11px] font-semibold transition-colors cursor-pointer"
+              title="Restaurar metas calculadas automaticamente a partir do seu catálogo e calendário atual"
+            >
+              Sincronizar do Catálogo
+            </button>
+          )}
+          <div className="text-right">
+            <span className="text-[10px] text-slate-400 uppercase font-semibold block">Tempo Decorrido</span>
+            <span className="font-mono text-xs text-white">
+              Dia {currentDayOfMonth} de {totalDaysInMonth} ({expectedProgressByToday.toFixed(0)}% do mês)
+            </span>
+          </div>
         </div>
       </div>
 
@@ -330,7 +452,10 @@ export const ProfitGoalsDashboardWidget: React.FC<ProfitGoalsDashboardWidgetProp
                 />
               </div>
               <div className="text-[11px] text-slate-400 mt-1">
-                Equivale a: <strong className="text-white font-mono">{unitsNeeded} hambúrgueres</strong>
+                Equivale a:{' '}
+                <strong className="text-white font-mono">
+                  {unitsNeeded} {usePortfolioAggregate ? 'vendas médias' : product.unit || 'unidades'}
+                </strong>
               </div>
             </div>
           </div>

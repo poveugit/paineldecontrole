@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   TrendingUp,
   AlertTriangle,
@@ -22,6 +22,7 @@ import {
   Building2,
   ShoppingCart,
   Store,
+  X,
 } from 'lucide-react';
 import { Header } from './components/Header';
 import { SpreadsheetMatrix } from './components/SpreadsheetMatrix';
@@ -56,6 +57,7 @@ import {
   dbSaveChannels,
   dbSaveFixedExpenses,
   dbSaveCompetitors,
+  dbDeleteCompetitor,
   dbSaveCustomCategories,
   dbSubscribeCustomCategories,
 } from './lib/firebase';
@@ -124,17 +126,26 @@ export default function App() {
     return saved ? JSON.parse(saved) : INITIAL_CHANNELS;
   });
 
+  const [productFocusScope, setProductFocusScope] = useState<'all' | 'single'>(() => {
+    const saved = localStorage.getItem('omniprice_product_focus_scope');
+    return saved === 'single' ? 'single' : 'all';
+  });
+
   const [dashboardChannelId, setDashboardChannelId] = useState<string>(() => {
     return selectedProduct.referenceChannelId || channels[0]?.id || 'uai-online';
   });
 
   useEffect(() => {
-    if (selectedProduct.referenceChannelId) {
+    if (productFocusScope === 'single' && selectedProduct.referenceChannelId) {
       setDashboardChannelId(selectedProduct.referenceChannelId);
-    } else if (channels.length > 0 && !channels.some((c) => c.id === dashboardChannelId)) {
+    } else if (
+      dashboardChannelId !== 'direct-zero' &&
+      channels.length > 0 &&
+      !channels.some((c) => c.id === dashboardChannelId)
+    ) {
       setDashboardChannelId(channels[0].id);
     }
-  }, [selectedProduct.id, selectedProduct.referenceChannelId, channels]);
+  }, [productFocusScope, selectedProduct.id, selectedProduct.referenceChannelId, channels, dashboardChannelId]);
 
   const activeDashboardChannel: ChannelFee =
     dashboardChannelId === 'direct-zero'
@@ -156,14 +167,107 @@ export default function App() {
           breakdown: { appBase: 12, paymentGateway: 3.5, anticipation: 1.99 },
         };
 
+  const portfolioSummary = useMemo(() => {
+    const activeList = products.filter((p) => p.active);
+    const targetList = activeList.length > 0 ? activeList : products;
+
+    const hasPositiveUnits = targetList.some((p) => (Number(p.estimatedMonthlyUnits) || 0) > 0);
+    let totalUnits = 0;
+    let totalRevenue = 0;
+    let totalCost = 0;
+    let totalFee = 0;
+    let weightedCostSum = 0;
+    let weightedPriceSum = 0;
+    let weightedTargetMarginSum = 0;
+    let totalWeight = 0;
+
+    targetList.forEach((p) => {
+      const units = Math.max(0, Number(p.estimatedMonthlyUnits) || 0);
+      const weight = hasPositiveUnits ? units : 1;
+      const price = Number(p.currentPrice) || 0;
+      const cost = Number(p.cost) || 0;
+      const unitFee = Number(((price * activeDashboardChannel.totalRate) / 100).toFixed(2));
+
+      totalUnits += units;
+      totalRevenue += price * units;
+      totalCost += cost * units;
+      totalFee += unitFee * units;
+
+      totalWeight += weight;
+      weightedPriceSum += price * weight;
+      weightedCostSum += cost * weight;
+      weightedTargetMarginSum += (Number(p.targetNetMargin) || 0.25) * weight;
+    });
+
+    const totalNetProfit = Number((totalRevenue - totalCost - totalFee).toFixed(2));
+    const netMarginPercent = totalRevenue > 0 ? (totalNetProfit / totalRevenue) * 100 : 0;
+
+    const safeWeight = totalWeight > 0 ? totalWeight : 1;
+    const avgCost = Number((weightedCostSum / safeWeight).toFixed(2));
+    const avgPrice = Number((weightedPriceSum / safeWeight).toFixed(2));
+    const avgTargetMargin = Number((weightedTargetMarginSum / safeWeight).toFixed(4));
+
+    const aggregateProduct: ProductItem = normalizeProduct({
+      ...DEFAULT_PRODUCT,
+      id: 'portfolio-all-products',
+      name: `Visão Geral (${targetList.length} ${targetList.length === 1 ? 'produto' : 'produtos'})`,
+      category: 'Todo o Catálogo',
+      description: `Consolidado mensal e média ponderada de ${targetList.length} ${targetList.length === 1 ? 'item ativo' : 'itens ativos'} (${totalUnits.toLocaleString('pt-BR')} un/mês).`,
+      cost: avgCost,
+      currentPrice: avgPrice,
+      targetNetMargin: avgTargetMargin > 0 ? avgTargetMargin : 0.25,
+      estimatedMonthlyUnits: totalUnits,
+      active: true,
+      referenceChannelId: activeDashboardChannel.id === 'direct-zero' ? undefined : activeDashboardChannel.id,
+    });
+
+    return {
+      itemCount: targetList.length,
+      totalCount: products.length,
+      totalUnits,
+      totalRevenue: Number(totalRevenue.toFixed(2)),
+      totalCost: Number(totalCost.toFixed(2)),
+      totalFee: Number(totalFee.toFixed(2)),
+      totalNetProfit,
+      netMarginPercent,
+      aggregateProduct,
+    };
+  }, [products, activeDashboardChannel.id, activeDashboardChannel.totalRate]);
+
+  const activeAnalysisProduct =
+    productFocusScope === 'all' ? portfolioSummary.aggregateProduct : selectedProduct;
+
   const [fixedExpenses, setFixedExpenses] = useState<FixedExpenses>(() => {
     const saved = localStorage.getItem('omniprice_fixed_expenses');
     return saved ? JSON.parse(saved) : INITIAL_FIXED_EXPENSES;
   });
 
   const [competitors, setCompetitors] = useState<CompetitorItem[]>(() => {
+    const LEGACY_SAMPLE_IDS = new Set(['comp-1', 'comp-2', 'comp-3', 'comp-4']);
+    const LEGACY_SAMPLE_NAMES = new Set([
+      'Burger Brothers Smash',
+      'Casa do Burger Delivery',
+      'Fast Chapa Lanches',
+      'Texas Smash Gourmet',
+    ]);
     const saved = localStorage.getItem('omniprice_competitors');
-    return saved ? JSON.parse(saved) : INITIAL_COMPETITORS;
+    if (!saved) {
+      localStorage.setItem('omniprice_sample_competitors_purged_v1', '1');
+      return [];
+    }
+    try {
+      const parsed: CompetitorItem[] = JSON.parse(saved);
+      if (!localStorage.getItem('omniprice_sample_competitors_purged_v1')) {
+        const cleaned = parsed.filter(
+          (c) => !(LEGACY_SAMPLE_IDS.has(c.id) && LEGACY_SAMPLE_NAMES.has(c.name))
+        );
+        localStorage.setItem('omniprice_sample_competitors_purged_v1', '1');
+        return cleaned;
+      }
+      return parsed;
+    } catch {
+      return [];
+    }
   });
 
   const [customCategories, setCustomCategories] = useState<string[]>(() => {
@@ -184,6 +288,7 @@ export default function App() {
 
   // Screen level navigation: 'dashboard' vs 'catalog-studio' vs 'fees' (Independent screen, zero floating cards!)
   const [activeScreen, setActiveScreen] = useState<'dashboard' | 'catalog-studio' | 'fees'>('dashboard');
+  const [catalogInitialEditProductId, setCatalogInitialEditProductId] = useState<string | null>(null);
 
   const [widgets, setWidgets] = useState<WidgetItem[]>(() => {
     const saved = localStorage.getItem('omniprice_widgets');
@@ -299,6 +404,17 @@ export default function App() {
               return merged;
             });
           });
+          // One-time cleanup of legacy sample competitors in Firestore
+          if (!localStorage.getItem('omniprice_firestore_sample_competitors_purged_v1')) {
+            Promise.all([
+              dbDeleteCompetitor('comp-1'),
+              dbDeleteCompetitor('comp-2'),
+              dbDeleteCompetitor('comp-3'),
+              dbDeleteCompetitor('comp-4'),
+            ])
+              .then(() => localStorage.setItem('omniprice_firestore_sample_competitors_purged_v1', '1'))
+              .catch(() => {});
+          }
         }
       } catch (err) {
         console.warn('Firebase initialization check:', err);
@@ -354,17 +470,22 @@ export default function App() {
     localStorage.setItem('omniprice_notifications', JSON.stringify(notifications));
   }, [notifications]);
 
+  useEffect(() => {
+    localStorage.setItem('omniprice_product_focus_scope', productFocusScope);
+  }, [productFocusScope]);
+
   // Initial AI Audit on load
   useEffect(() => {
     triggerAIAudit();
-  }, [selectedProduct.id, selectedProduct.cost]);
+  }, [productFocusScope, activeAnalysisProduct.id, activeAnalysisProduct.cost]);
 
   // Execute AI Audit
   const triggerAIAudit = async () => {
+    const targetProduct = activeAnalysisProduct;
     setIsAuditing(true);
     try {
       const currentPricingMatrix = SPREADSHEET_MARGINS.map((m) =>
-        calculateSpreadsheetRow(selectedProduct.cost, 17.49, m)
+        calculateSpreadsheetRow(targetProduct.cost, activeDashboardChannel.totalRate, m)
       );
 
       const res = await fetch('/api/ai/pricing-audit', {
@@ -375,13 +496,13 @@ export default function App() {
         },
         body: JSON.stringify({
           product: {
-            id: selectedProduct.id,
-            name: selectedProduct.name,
-            cost: Number(selectedProduct.cost) || 6.89,
-            currentPrice: Number(selectedProduct.currentPrice) || 9.84,
-            targetNetMargin: Number(selectedProduct.targetNetMargin) || 0.25,
+            id: targetProduct.id,
+            name: targetProduct.name,
+            cost: Number(targetProduct.cost) || 0,
+            currentPrice: Number(targetProduct.currentPrice) || 0,
+            targetNetMargin: Number(targetProduct.targetNetMargin) || 0.25,
           },
-          channels: (channels || []).slice(0, 8),
+          channels: channels || [],
           fixedCosts: fixedExpenses,
           currentPricingMatrix,
         }),
@@ -398,11 +519,11 @@ export default function App() {
       }
 
       // If response is not ok or not JSON, use local heuristic fallback seamlessly
-      const fallbackAudit = generateLocalAuditFallback(selectedProduct, channels, fixedExpenses);
+      const fallbackAudit = generateLocalAuditFallback(targetProduct, channels, fixedExpenses);
       setAuditResult(fallbackAudit);
       setAuditNotice('Motor heurístico local ativado.');
     } catch {
-      const fallbackAudit = generateLocalAuditFallback(selectedProduct, channels, fixedExpenses);
+      const fallbackAudit = generateLocalAuditFallback(targetProduct, channels, fixedExpenses);
       setAuditResult(fallbackAudit);
       setAuditNotice('Motor heurístico local ativado.');
     } finally {
@@ -441,6 +562,7 @@ export default function App() {
 
   // Cost update
   const handleUpdateProductCost = (newCost: number) => {
+    if (productFocusScope === 'all') return;
     if (!currentUser.permissions.canEditCosts) {
       alert('Seu perfil atual não possui permissão para editar custos de insumos.');
       return;
@@ -453,6 +575,21 @@ export default function App() {
 
   // Price apply
   const handleApplyRecommendedPrice = (price: number) => {
+    if (productFocusScope === 'all') {
+      setNotifications((prev) => [
+        {
+          id: 'notif-' + Date.now(),
+          title: 'Modo Visão Geral Ativo',
+          message: 'Selecione um produto específico em foco para aplicar um novo preço individual.',
+          type: 'warning',
+          timestamp: 'Agora',
+          read: false,
+          source: 'system',
+        },
+        ...prev,
+      ]);
+      return;
+    }
     if (!currentUser.permissions.canEditPrices) {
       alert('Seu perfil atual não possui permissão para alterar preços finais de venda.');
       return;
@@ -536,7 +673,8 @@ export default function App() {
 
   // Add competitor
   const handleAddCompetitor = (newComp: Omit<CompetitorItem, 'id' | 'differenceToUs' | 'threatLevel'>) => {
-    const diff = ((newComp.price - selectedProduct.currentPrice) / selectedProduct.currentPrice) * 100;
+    const basePrice = Number(selectedProduct.currentPrice) || 0;
+    const diff = basePrice > 0 ? ((newComp.price - basePrice) / basePrice) * 100 : 0;
     const item: CompetitorItem = {
       ...newComp,
       id: 'comp-' + Date.now(),
@@ -544,8 +682,9 @@ export default function App() {
       threatLevel: diff < -5 ? 'high' : diff < 10 ? 'medium' : 'low',
     };
     setCompetitors((prev) => [item, ...prev]);
+    dbSaveCompetitors([item]).then(() => setLastSyncTime(new Date())).catch(console.error);
 
-    if (item.threatLevel === 'high') {
+    if (item.threatLevel === 'high' && basePrice > 0) {
       setNotifications((prev) => [
         {
           id: 'notif-' + Date.now(),
@@ -564,6 +703,7 @@ export default function App() {
   // Remove competitor
   const handleRemoveCompetitor = (id: string) => {
     setCompetitors((prev) => prev.filter((c) => c.id !== id));
+    dbDeleteCompetitor(id).then(() => setLastSyncTime(new Date())).catch(console.error);
   };
 
   // Add product
@@ -702,9 +842,9 @@ export default function App() {
   // Export CSV
   const handleExportCSV = () => {
     const rows = SPREADSHEET_MARGINS.map((m) =>
-      calculateSpreadsheetRow(selectedProduct.cost, 17.49, m)
+      calculateSpreadsheetRow(activeAnalysisProduct.cost, activeDashboardChannel.totalRate, m)
     );
-    exportPricingToCSV(selectedProduct, 17.49, rows);
+    exportPricingToCSV(activeAnalysisProduct, activeDashboardChannel.totalRate, rows);
   };
 
   // Widget management
@@ -767,15 +907,18 @@ export default function App() {
 
   // Render individual widget component by id (used for both feed and spotlight focus modal)
   const renderWidgetById = (widgetId: string) => {
+    const isPortfolioMode = productFocusScope === 'all';
+
     switch (widgetId) {
       case 'consolidated-profitability':
         return (
           <ConsolidatedProfitabilityWidget
             products={products}
             channels={channels}
-            selectedProduct={selectedProduct}
+            selectedProduct={isPortfolioMode ? undefined : selectedProduct}
             onSelectProduct={(p) => {
               setSelectedProduct(p);
+              setProductFocusScope('single');
               window.scrollTo({ top: 0, behavior: 'smooth' });
             }}
             onOpenCatalogStudio={() => {
@@ -788,10 +931,14 @@ export default function App() {
       case 'matrix-table':
         return (
           <SpreadsheetMatrix
-            product={selectedProduct}
-            canEditCosts={currentUser.permissions.canEditCosts}
+            product={activeAnalysisProduct}
+            products={products}
+            channels={channels}
+            preferredChannelId={activeDashboardChannel.id}
+            canEditCosts={isPortfolioMode ? false : currentUser.permissions.canEditCosts}
             onUpdateProductCost={handleUpdateProductCost}
-            onApplyRecommendedPrice={handleApplyRecommendedPrice}
+            onApplyRecommendedPrice={isPortfolioMode ? undefined : handleApplyRecommendedPrice}
+            isPortfolioMode={isPortfolioMode}
           />
         );
 
@@ -802,7 +949,7 @@ export default function App() {
             auditNotice={auditNotice}
             isLoading={isAuditing}
             onRefreshAudit={triggerAIAudit}
-            product={selectedProduct}
+            product={activeAnalysisProduct}
             channels={channels}
             onApplyAdjustment={handleApplyRecommendedPrice}
           />
@@ -811,7 +958,9 @@ export default function App() {
       case 'profit-goals-dashboard':
         return (
           <ProfitGoalsDashboardWidget
-            product={selectedProduct}
+            product={activeAnalysisProduct}
+            products={products}
+            isPortfolioMode={isPortfolioMode}
             fixedExpenses={fixedExpenses}
             channels={channels}
             preferredChannelId={activeDashboardChannel.id}
@@ -821,9 +970,9 @@ export default function App() {
       case 'what-if-simulator':
         return (
           <WhatIfSimulatorWidget
-            product={selectedProduct}
+            product={activeAnalysisProduct}
             channels={channels}
-            canEditPrices={currentUser.permissions.canEditPrices}
+            canEditPrices={isPortfolioMode ? false : currentUser.permissions.canEditPrices}
             onApplyPrice={handleApplyRecommendedPrice}
             preferredChannelId={activeDashboardChannel.id}
           />
@@ -832,7 +981,7 @@ export default function App() {
       case 'price-margin-evolution':
         return (
           <PriceMarginEvolutionWidget
-            product={selectedProduct}
+            product={activeAnalysisProduct}
             channels={channels}
             preferredChannelId={activeDashboardChannel.id}
           />
@@ -841,7 +990,9 @@ export default function App() {
       case 'cost-seasonality':
         return (
           <CostSeasonalityWidget
-            product={selectedProduct}
+            product={activeAnalysisProduct}
+            activeChannelRate={activeDashboardChannel.totalRate}
+            isPortfolioMode={isPortfolioMode}
           />
         );
 
@@ -849,7 +1000,9 @@ export default function App() {
         return (
           <ChannelComparisonWidget
             channels={channels}
-            product={selectedProduct}
+            product={activeAnalysisProduct}
+            products={products}
+            isPortfolioMode={isPortfolioMode}
             canEditFees={currentUser.permissions.canEditFees}
             onUpdateChannelFee={handleUpdateChannelFee}
           />
@@ -858,7 +1011,9 @@ export default function App() {
       case 'dre-breakdown':
         return (
           <DREWidget
-            product={selectedProduct}
+            product={activeAnalysisProduct}
+            products={products}
+            isPortfolioMode={isPortfolioMode}
             fixedExpenses={fixedExpenses}
             selectedChannel={activeDashboardChannel}
             onUpdateFixedExpenses={setFixedExpenses}
@@ -870,8 +1025,10 @@ export default function App() {
         return (
           <CompetitorRadarWidget
             competitors={competitors}
-            product={selectedProduct}
+            product={activeAnalysisProduct}
             channels={channels}
+            preferredChannelId={activeDashboardChannel.id}
+            isPortfolioMode={isPortfolioMode}
             onAddCompetitor={handleAddCompetitor}
             onRemoveCompetitor={handleRemoveCompetitor}
             onApplyPrice={handleApplyRecommendedPrice}
@@ -881,11 +1038,12 @@ export default function App() {
       case 'breakeven-calc':
         return (
           <BreakevenShieldedWidget
-            product={selectedProduct}
+            product={activeAnalysisProduct}
+            isPortfolioMode={isPortfolioMode}
             channels={channels}
             fixedExpenses={fixedExpenses}
             onApplyPrice={handleApplyRecommendedPrice}
-            canEditPrices={currentUser.permissions.canEditPrices}
+            canEditPrices={isPortfolioMode ? false : currentUser.permissions.canEditPrices}
             preferredChannelId={activeDashboardChannel.id}
           />
         );
@@ -894,7 +1052,8 @@ export default function App() {
         return (
           <CommercialChannelManagerWidget
             channels={channels}
-            product={selectedProduct}
+            product={activeAnalysisProduct}
+            isPortfolioMode={isPortfolioMode}
             onOpenFeeManager={() => {
               setActiveScreen('fees');
               window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -908,8 +1067,21 @@ export default function App() {
           <OperationsControlWidget
             products={products}
             channels={channels}
-            selectedProduct={selectedProduct}
-            onSelectProduct={setSelectedProduct}
+            selectedProduct={isPortfolioMode ? null : selectedProduct}
+            onSelectProduct={(p) => {
+              setSelectedProduct(p);
+              setProductFocusScope('single');
+            }}
+            onEditProduct={(p) => {
+              setSelectedProduct(p);
+              setProductFocusScope('single');
+              setCatalogInitialEditProductId(p.id);
+              setFocusedWidgetId(null);
+              setActiveScreen('catalog-studio');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            onClearProductFocus={() => setProductFocusScope('all')}
+            onToggleProductActive={(p) => handleUpdateProduct({ ...p, active: p.active === false })}
             canEditPrices={currentUser.permissions.canEditPrices}
           />
         );
@@ -1003,6 +1175,8 @@ export default function App() {
                 onAddProduct={handleAddProduct}
                 onDeleteProduct={handleDeleteProduct}
                 onBatchImportProducts={handleBatchImportProducts}
+                initialEditProductId={catalogInitialEditProductId}
+                onConsumeInitialEdit={() => setCatalogInitialEditProductId(null)}
                 onBackToDashboard={() => {
                   setActiveScreen('dashboard');
                   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1096,76 +1270,185 @@ export default function App() {
                 </div>
               )}
 
-              {/* Active Product Selector Banner - Expansive full-width executive strip */}
+              {/* Active Scope & Product Selector Banner - Expansive full-width executive strip across all tabs */}
               {(() => {
-                const feeAmt = Number(
+                const isPortfolioMode = productFocusScope === 'all';
+                const singleFeeAmt = Number(
                   ((selectedProduct.currentPrice * activeDashboardChannel.totalRate) / 100).toFixed(2)
                 );
-                const netProfitAmt = Number(
-                  (selectedProduct.currentPrice - selectedProduct.cost - feeAmt).toFixed(2)
+                const singleNetProfitAmt = Number(
+                  (selectedProduct.currentPrice - selectedProduct.cost - singleFeeAmt).toFixed(2)
                 );
-                const netMarginPercent =
+                const singleNetMarginPercent =
                   selectedProduct.currentPrice > 0
-                    ? (netProfitAmt / selectedProduct.currentPrice) * 100
+                    ? (singleNetProfitAmt / selectedProduct.currentPrice) * 100
                     : 0;
+
+                const displayCost = isPortfolioMode ? portfolioSummary.totalCost : selectedProduct.cost;
+                const displayRevenue = isPortfolioMode ? portfolioSummary.totalRevenue : selectedProduct.currentPrice;
+                const displayFee = isPortfolioMode ? portfolioSummary.totalFee : singleFeeAmt;
+                const displayNetProfit = isPortfolioMode ? portfolioSummary.totalNetProfit : singleNetProfitAmt;
+                const displayNetMargin = isPortfolioMode ? portfolioSummary.netMarginPercent : singleNetMarginPercent;
 
                 return (
                   <div className="w-full p-4 sm:p-5 lg:p-6 rounded-3xl bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 border border-slate-800 shadow-xl flex flex-col xl:flex-row items-start xl:items-center justify-between gap-5">
-                    <div className="flex items-center gap-4 shrink-0">
-                      <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-gradient-to-tr from-emerald-500/20 via-teal-500/15 to-cyan-500/20 border border-emerald-500/30 text-emerald-400 flex items-center justify-center shrink-0 shadow-lg shadow-emerald-500/10">
-                        <Package className="w-6 h-6 sm:w-7 sm:h-7" />
+                    <div className="flex items-center gap-4 min-w-0">
+                      <div
+                        className={`w-12 h-12 sm:w-14 sm:h-14 rounded-2xl border flex items-center justify-center shrink-0 shadow-lg ${
+                          isPortfolioMode
+                            ? 'bg-gradient-to-tr from-cyan-500/20 via-emerald-500/15 to-teal-500/20 border-cyan-500/30 text-cyan-300 shadow-cyan-500/10'
+                            : 'bg-gradient-to-tr from-emerald-500/20 via-teal-500/15 to-cyan-500/20 border-emerald-500/30 text-emerald-400 shadow-emerald-500/10'
+                        }`}
+                      >
+                        {isPortfolioMode ? (
+                          <Layers className="w-6 h-6 sm:w-7 sm:h-7" />
+                        ) : (
+                          <Package className="w-6 h-6 sm:w-7 sm:h-7" />
+                        )}
                       </div>
-                      <div>
+
+                      <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
-                            Ficha Técnica em Precificação
+                          <span
+                            className={`text-xs font-bold uppercase tracking-wider ${
+                              isPortfolioMode ? 'text-cyan-300' : 'text-emerald-400'
+                            }`}
+                          >
+                            {isPortfolioMode ? 'Visão Geral do Catálogo' : 'Ficha Técnica em Foco'}
                           </span>
-                          <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
-                            {selectedProduct.category}
-                          </span>
-                          <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                            {selectedProduct.active ? 'Cardápio Ativo' : 'Pausado'}
-                          </span>
+                          {isPortfolioMode ? (
+                            <>
+                              <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-200 border border-cyan-500/30 font-semibold">
+                                {portfolioSummary.itemCount} ativos / {portfolioSummary.totalCount} itens
+                              </span>
+                              <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 font-mono">
+                                {portfolioSummary.totalUnits.toLocaleString('pt-BR')} un/mês
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+                                {selectedProduct.category}
+                              </span>
+                              <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                                {selectedProduct.active ? 'Cardápio Ativo' : 'Pausado'}
+                              </span>
+                              <button
+                                onClick={() => setProductFocusScope('all')}
+                                className="inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/30 transition-all"
+                                title="Remover foco deste único produto para visualizar todos os itens consolidados"
+                              >
+                                <X className="w-3 h-3" />
+                                <span>Tirar Foco (Ver Tudo)</span>
+                              </button>
+                            </>
+                          )}
                         </div>
-                        <h1 className="text-lg sm:text-xl xl:text-2xl font-black text-white tracking-tight mt-1">
-                          {selectedProduct.name}
+                        <h1 className="text-lg sm:text-xl xl:text-2xl font-black text-white tracking-tight mt-1 truncate">
+                          {isPortfolioMode ? 'Todos os Produtos do Catálogo' : selectedProduct.name}
                         </h1>
                         <p className="text-xs text-slate-400 mt-0.5 max-w-2xl line-clamp-1">
-                          {selectedProduct.description || 'Ficha técnica conectada ao motor de precificação e viabilidade contábil.'}
+                          {isPortfolioMode
+                            ? 'Consolidado real de vendas, CMV, taxas e lucro líquido de todo o catálogo sem travar em um único produto.'
+                            : selectedProduct.description || 'Ficha técnica conectada ao motor de precificação e viabilidade contábil.'}
                         </p>
                       </div>
                     </div>
 
-                    {/* Quick Metrics & Actions Bar */}
+                    {/* Quick Scope Controls, Metrics & Actions Bar */}
                     <div className="flex flex-wrap items-center gap-3 w-full xl:w-auto justify-between xl:justify-end">
                       <div className="flex flex-col gap-2 w-full sm:w-auto">
-                        <div className="flex items-center justify-between gap-2 bg-slate-950/80 px-3 py-1.5 rounded-xl border border-slate-800/80 text-[11px]">
-                          <span className="text-slate-400 font-semibold shrink-0">Canal Avaliado:</span>
-                          <select
-                            value={activeDashboardChannel.id}
-                            onChange={(e) => setDashboardChannelId(e.target.value)}
-                            aria-label="Selecionar canal avaliado no painel"
-                            className="bg-transparent text-cyan-300 font-bold focus:outline-none cursor-pointer truncate max-w-[240px]"
-                          >
-                            {channels.map((ch) => (
-                              <option key={ch.id} value={ch.id} className="bg-slate-900 text-white">
-                                {ch.name} ({ch.totalRate.toFixed(2).replace('.', ',')}%)
+                        <div className="flex flex-wrap items-center gap-2">
+                          {/* Scope Mode Toggle */}
+                          <div className="flex items-center bg-slate-950/90 p-1 rounded-xl border border-slate-800 text-[11px]">
+                            <button
+                              onClick={() => setProductFocusScope('all')}
+                              className={`px-2.5 py-1 rounded-lg font-semibold transition-all flex items-center gap-1 ${
+                                isPortfolioMode
+                                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shadow-sm'
+                                  : 'text-slate-400 hover:text-white border border-transparent'
+                              }`}
+                            >
+                              <Layers className="w-3 h-3" />
+                              <span>Visão Geral (Todos)</span>
+                            </button>
+                            <button
+                              onClick={() => setProductFocusScope('single')}
+                              className={`px-2.5 py-1 rounded-lg font-semibold transition-all flex items-center gap-1 ${
+                                !isPortfolioMode
+                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shadow-sm'
+                                  : 'text-slate-400 hover:text-white border border-transparent'
+                              }`}
+                            >
+                              <Package className="w-3 h-3" />
+                              <span>Produto em Foco</span>
+                            </button>
+                          </div>
+
+                          {/* Product Focus Selector (includes Clear Focus option) */}
+                          <div className="flex items-center justify-between gap-2 bg-slate-950/80 px-3 py-1.5 rounded-xl border border-slate-800/80 text-[11px]">
+                            <span className="text-slate-400 font-semibold shrink-0">Escopo:</span>
+                            <select
+                              value={isPortfolioMode ? '__ALL__' : selectedProduct.id}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                if (val === '__ALL__') {
+                                  setProductFocusScope('all');
+                                } else {
+                                  const found = products.find((p) => p.id === val);
+                                  if (found) {
+                                    setSelectedProduct(found);
+                                    setProductFocusScope('single');
+                                  }
+                                }
+                              }}
+                              aria-label="Selecionar escopo de produto no painel"
+                              className="bg-transparent text-emerald-300 font-bold focus:outline-none cursor-pointer truncate max-w-[200px]"
+                            >
+                              <option value="__ALL__" className="bg-slate-900 text-cyan-300">
+                                Todos os Produtos (Visão Geral)
                               </option>
-                            ))}
-                            <option value="direct-zero" className="bg-slate-900 text-white">
-                              Balcão Direto — Sem Taxa (0,00%)
-                            </option>
-                          </select>
+                              {products.map((prod) => (
+                                <option key={prod.id} value={prod.id} className="bg-slate-900 text-white">
+                                  {prod.name} ({formatBRL(prod.currentPrice)})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Channel Selector */}
+                          <div className="flex items-center justify-between gap-2 bg-slate-950/80 px-3 py-1.5 rounded-xl border border-slate-800/80 text-[11px]">
+                            <span className="text-slate-400 font-semibold shrink-0">Canal Avaliado:</span>
+                            <select
+                              value={activeDashboardChannel.id}
+                              onChange={(e) => setDashboardChannelId(e.target.value)}
+                              aria-label="Selecionar canal avaliado no painel"
+                              className="bg-transparent text-cyan-300 font-bold focus:outline-none cursor-pointer truncate max-w-[220px]"
+                            >
+                              {channels.map((ch) => (
+                                <option key={ch.id} value={ch.id} className="bg-slate-900 text-white">
+                                  {ch.name} ({ch.totalRate.toFixed(2).replace('.', ',')}%)
+                                </option>
+                              ))}
+                              <option value="direct-zero" className="bg-slate-900 text-white">
+                                Balcão Direto — Sem Taxa (0,00%)
+                              </option>
+                            </select>
+                          </div>
                         </div>
 
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 bg-slate-950/80 p-2 sm:p-2.5 rounded-2xl border border-slate-800/80 text-xs w-full sm:w-auto">
                           <div className="px-3 py-1">
-                            <span className="text-[10px] text-slate-400 uppercase block font-semibold">Custo CMV</span>
-                            <span className="font-mono font-bold text-white text-sm sm:text-base">{formatBRL(selectedProduct.cost)}</span>
+                            <span className="text-[10px] text-slate-400 uppercase block font-semibold">
+                              {isPortfolioMode ? 'CMV Total (Mês)' : 'Custo CMV'}
+                            </span>
+                            <span className="font-mono font-bold text-white text-sm sm:text-base">{formatBRL(displayCost)}</span>
                           </div>
                           <div className="px-3 py-1 border-l border-slate-800">
-                            <span className="text-[10px] text-slate-400 uppercase block font-semibold">Preço Venda</span>
-                            <span className="font-mono font-bold text-emerald-400 text-sm sm:text-base">{formatBRL(selectedProduct.currentPrice)}</span>
+                            <span className="text-[10px] text-slate-400 uppercase block font-semibold">
+                              {isPortfolioMode ? 'Faturamento (Mês)' : 'Preço Venda'}
+                            </span>
+                            <span className="font-mono font-bold text-emerald-400 text-sm sm:text-base">{formatBRL(displayRevenue)}</span>
                           </div>
                           <div className="px-3 py-1 border-l border-slate-800">
                             <span
@@ -1174,12 +1457,14 @@ export default function App() {
                             >
                               Taxa ({activeDashboardChannel.totalRate.toFixed(2).replace('.', ',')}%)
                             </span>
-                            <span className="font-mono font-bold text-rose-400 text-sm sm:text-base">- {formatBRL(feeAmt)}</span>
+                            <span className="font-mono font-bold text-rose-400 text-sm sm:text-base">- {formatBRL(displayFee)}</span>
                           </div>
                           <div className="px-3 py-1 border-l border-slate-800">
-                            <span className="text-[10px] text-slate-400 uppercase block font-semibold">Lucro Real</span>
-                            <span className={`font-mono font-bold text-sm sm:text-base ${netProfitAmt > 0 ? 'text-emerald-300' : 'text-rose-400'}`}>
-                              {formatBRL(netProfitAmt)} <span className="text-[10px]">({netMarginPercent.toFixed(1)}%)</span>
+                            <span className="text-[10px] text-slate-400 uppercase block font-semibold">
+                              {isPortfolioMode ? 'Lucro Real (Mês)' : 'Lucro Real'}
+                            </span>
+                            <span className={`font-mono font-bold text-sm sm:text-base ${displayNetProfit > 0 ? 'text-emerald-300' : 'text-rose-400'}`}>
+                              {formatBRL(displayNetProfit)} <span className="text-[10px]">({displayNetMargin.toFixed(1)}%)</span>
                             </span>
                           </div>
                         </div>
@@ -1254,7 +1539,7 @@ export default function App() {
       <ExecutiveReportModal
         isOpen={isReportModalOpen}
         onClose={() => setIsReportModalOpen(false)}
-        product={selectedProduct}
+        product={activeAnalysisProduct}
         channels={channels}
         fixedExpenses={fixedExpenses}
         auditResult={auditResult}

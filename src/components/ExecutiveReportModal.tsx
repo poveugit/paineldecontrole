@@ -41,7 +41,15 @@ export const ExecutiveReportModal: React.FC<ExecutiveReportModalProps> = ({
     window.print();
   };
 
-  const sampleRates = [12.0, 13.49, 15.89, 17.49];
+  const reportChannels = channels.length > 0 ? channels : [];
+  const primaryRate = reportChannels[0]?.totalRate ?? 17.49;
+  const unitFeePrimary = Number(((product.currentPrice * primaryRate) / 100).toFixed(2));
+  const unitContrib = product.currentPrice - product.cost - unitFeePrimary;
+  const calculatedBreakEvenUnits =
+    unitContrib > 0 && fixedExpenses.totalFixed > 0
+      ? Math.ceil(fixedExpenses.totalFixed / unitContrib)
+      : 0;
+  const protocolCode = `OP-${product.id.slice(-6).toUpperCase().replace(/[^A-Z0-9]/g, '0')}`;
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-6">
@@ -104,7 +112,7 @@ export const ExecutiveReportModal: React.FC<ExecutiveReportModalProps> = ({
             <div className="text-right text-xs text-slate-400 print:text-gray-600 font-mono">
               <div>Data: {new Date().toLocaleDateString('pt-BR')}</div>
               <div>Horário: {new Date().toLocaleTimeString('pt-BR')}</div>
-              <div>Protocolo: OP-{(Math.random() * 900000 + 100000).toFixed(0)}</div>
+              <div>Protocolo: {protocolCode}</div>
             </div>
           </div>
 
@@ -144,14 +152,18 @@ export const ExecutiveReportModal: React.FC<ExecutiveReportModalProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800 print:divide-gray-200">
-                  {sampleRates.map((rate) => {
+                  {reportChannels.map((ch) => {
+                    const rate = ch.totalRate;
                     const row20 = calculateSpreadsheetRow(product.cost, rate, SPREADSHEET_MARGINS[0]);
                     const row30 = calculateSpreadsheetRow(product.cost, rate, SPREADSHEET_MARGINS[3]);
                     const row40 = calculateSpreadsheetRow(product.cost, rate, SPREADSHEET_MARGINS[5]);
                     return (
-                      <tr key={rate} className="hover:bg-slate-900/40 print:hover:bg-transparent">
+                      <tr key={ch.id} className="hover:bg-slate-900/40 print:hover:bg-transparent">
                         <td className="py-2 px-3 font-sans font-bold text-white print:text-gray-900">
-                          {rate.toFixed(2).replace('.', ',')}% de Taxas
+                          <div>{ch.name}</div>
+                          <div className="text-[10px] text-slate-400 font-mono font-normal">
+                            {rate.toFixed(2).replace('.', ',')}% de Taxas
+                          </div>
                         </td>
                         <td className="py-2 px-3 text-center">{formatBRL(row20.sellingPrice)}</td>
                         <td className="py-2 px-3 text-center text-emerald-400 print:text-emerald-700 font-bold">
@@ -193,7 +205,14 @@ export const ExecutiveReportModal: React.FC<ExecutiveReportModalProps> = ({
               <div className="space-y-1 text-slate-300 print:text-gray-700 font-mono">
                 <div>Despesas Fixas Totais: {formatBRL(fixedExpenses.totalFixed)}</div>
                 <div>Projeção de Lucro Alvo: {formatBRL(fixedExpenses.profitProjection)}</div>
-                <div>Volume Mínimo Estimado: ~140 unidades/mês</div>
+                <div>
+                  Volume Mínimo (Ponto de Equilíbrio):{' '}
+                  {calculatedBreakEvenUnits > 0
+                    ? `${calculatedBreakEvenUnits} unidades/mês`
+                    : fixedExpenses.totalFixed === 0
+                    ? '0 (sem despesas fixas cadastradas)'
+                    : 'Margem insuficiente'}
+                </div>
               </div>
             </div>
           </div>

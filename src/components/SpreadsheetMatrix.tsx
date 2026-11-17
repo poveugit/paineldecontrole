@@ -1,123 +1,196 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { motion } from 'motion/react';
 import {
   Table,
   Sparkles,
-  HelpCircle,
   AlertTriangle,
-  ArrowRight,
   ShieldCheck,
   TrendingUp,
   TrendingDown,
-  Percent,
   Sliders,
-  CheckCircle,
-  DollarSign,
-  Calendar,
-  ArrowUpRight,
-  ArrowDownRight,
+  ChevronDown,
+  ChevronUp,
+  Info,
 } from 'lucide-react';
-import { ProductItem, PricingMatrixRow } from '../types/pricing';
-import { SPREADSHEET_MARGINS, calculateSpreadsheetRow, formatBRL, formatPercent } from '../utils/pricingEngine';
+import { ProductItem, PricingMatrixRow, ChannelFee } from '../types/pricing';
+import {
+  SPREADSHEET_MARGINS,
+  INITIAL_CHANNELS,
+  calculateSpreadsheetRow,
+  calculateIngredientsCMV,
+  formatBRL,
+  formatPercent,
+} from '../utils/pricingEngine';
 
 interface SpreadsheetMatrixProps {
   product: ProductItem;
+  products?: ProductItem[];
+  channels?: ChannelFee[];
+  preferredChannelId?: string;
   canEditCosts: boolean;
   onUpdateProductCost: (newCost: number) => void;
   onApplyRecommendedPrice?: (price: number) => void;
+  isPortfolioMode?: boolean;
 }
 
 export const SpreadsheetMatrix: React.FC<SpreadsheetMatrixProps> = ({
   product,
+  products = [],
+  channels = INITIAL_CHANNELS,
+  preferredChannelId,
   canEditCosts,
   onUpdateProductCost,
   onApplyRecommendedPrice,
+  isPortfolioMode = false,
 }) => {
-  // Preset fee rates from the user's spreadsheet
-  const presetRates = [
-    { rate: 12.0, label: '12% de Taxas (Uai Rango Dinheiro / Base)' },
-    { rate: 13.49, label: '13,49% de Taxas (Débito + App)' },
-    { rate: 15.89, label: '15,89% de Taxas (Intermediário)' },
-    { rate: 17.49, label: '17,49% de Taxas (Uai Rango Pagamento Online)', isMax: true },
-  ];
+  const rateOptions = useMemo(() => {
+    const source = channels.length > 0 ? channels : INITIAL_CHANNELS;
+    const maxRate = Math.max(...source.map((c) => Number(c.totalRate) || 0));
+    return source.map((ch) => ({
+      id: ch.id,
+      rate: Number(ch.totalRate) || 0,
+      label: ch.name,
+      platformName: ch.platformName,
+      isMax: (Number(ch.totalRate) || 0) === maxRate && maxRate > 0,
+      highlight: ch.highlight,
+    }));
+  }, [channels]);
 
-  const [activeRateTab, setActiveRateTab] = useState<number>(17.49);
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(
+    preferredChannelId && rateOptions.some((r) => r.id === preferredChannelId)
+      ? preferredChannelId
+      : rateOptions[0]?.id || 'uai-online'
+  );
+  const [showAllRates, setShowAllRates] = useState<boolean>(false);
   const [viewMode, setViewMode] = useState<'single' | 'grid'>('single');
   const [showShieldComparison, setShowShieldComparison] = useState(true);
 
-  // Generate rows for a specific rate
+  const initialProductCostsRef = useRef<Record<string, number>>({});
+  if (product.id && initialProductCostsRef.current[product.id] === undefined) {
+    initialProductCostsRef.current[product.id] = Number(product.cost) || 0;
+  }
+  const restoreCostValue = useMemo(() => {
+    if (product.ingredients && product.ingredients.length > 0) {
+      const recipeCost = calculateIngredientsCMV(product.ingredients);
+      if (recipeCost > 0) return recipeCost;
+    }
+    return initialProductCostsRef.current[product.id] ?? (Number(product.cost) || 0);
+  }, [product.id, product.ingredients, product.cost]);
+
+  useEffect(() => {
+    if (preferredChannelId && rateOptions.some((r) => r.id === preferredChannelId)) {
+      setSelectedChannelId(preferredChannelId);
+    } else if (rateOptions.length > 0 && !rateOptions.some((r) => r.id === selectedChannelId)) {
+      setSelectedChannelId(rateOptions[0].id);
+    }
+  }, [preferredChannelId, rateOptions, selectedChannelId]);
+
+  const activeChannelOption =
+    rateOptions.find((r) => r.id === selectedChannelId) || rateOptions[0] || {
+      id: 'uai-online',
+      rate: 17.49,
+      label: 'Uai Rango Pagamento Online',
+      platformName: 'Uai Rango',
+      isMax: true,
+    };
+
+  const activeRateTab = activeChannelOption.rate;
+
+  const visibleRateCards = useMemo(() => {
+    if (showAllRates || rateOptions.length <= 4) return rateOptions;
+    const baseFour = rateOptions.slice(0, 4);
+    if (baseFour.some((r) => r.id === activeChannelOption.id)) {
+      return baseFour;
+    }
+    return [...rateOptions.slice(0, 3), activeChannelOption];
+  }, [showAllRates, rateOptions, activeChannelOption]);
+
+  // Generate rows for a specific rate based on product.cost (or weighted avg cost in portfolio mode)
   const getRowsForRate = (rate: number): PricingMatrixRow[] => {
     return SPREADSHEET_MARGINS.map((m) => calculateSpreadsheetRow(product.cost, rate, m));
   };
 
   const currentRows = getRowsForRate(activeRateTab);
 
-  // Cálculo de evolução diária comparada ao dia anterior (D-1) com semente estável por produto
-  const dailyEvolution = useMemo(() => {
-    const hashSeed = product.id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+  // Métricas reais do produto ou média ponderada real do catálogo no modo Visão Geral
+  const executiveMetrics = useMemo(() => {
+    const sim30Row = currentRows[2] || currentRows[0];
 
-    // Linha alvo correspondente à margem de 30% da planilha (ou índice 2)
-    const targetRow = currentRows[2] || currentRows[0];
-    const currentPrice = targetRow?.sellingPrice || 9.84;
-    const currentMargin = targetRow?.netMarginPercent || 12.5;
-    const currentProfit = targetRow?.netProfit || 1.23;
+    let activeCount = 1;
+    let totalUnits = Math.max(0, Number(product.estimatedMonthlyUnits) || 0);
+    let realPrice = Number(product.currentPrice) || 0;
+    let realCost = Number(product.cost) || 0;
+    let realFee = Number(((realPrice * activeRateTab) / 100).toFixed(2));
+    let realProfit = Number((realPrice - realCost - realFee).toFixed(2));
+    let realMarginPct = realPrice > 0 ? (realProfit / realPrice) * 100 : 0;
+    let monthlyCost = Number((realCost * totalUnits).toFixed(2));
+    let monthlyProfit = Number((realProfit * totalUnits).toFixed(2));
 
-    // Variação percentual diária de preço (+1.8% a +3.2%)
-    const priceDeltaPct = Number((((hashSeed % 7) - 2) * 0.6 + 1.2).toFixed(1));
-    const prevPrice = Number((currentPrice / (1 + priceDeltaPct / 100)).toFixed(2));
+    if (isPortfolioMode && products.length > 0) {
+      const activeList = products.filter((p) => p.active);
+      const targetList = activeList.length > 0 ? activeList : products;
+      activeCount = targetList.length;
 
-    // Variação percentual diária de margem (+0.8% a +1.8% p.p.)
-    const marginDeltaPct = Number((((hashSeed % 5) - 1) * 0.5 + 0.9).toFixed(1));
-    const prevMargin = Number((currentMargin - marginDeltaPct).toFixed(1));
+      const hasPositiveUnits = targetList.some((p) => (Number(p.estimatedMonthlyUnits) || 0) > 0);
+      let sumUnits = 0;
+      let sumRevenue = 0;
+      let sumCost = 0;
+      let sumFee = 0;
+      let weightedPriceSum = 0;
+      let weightedCostSum = 0;
+      let weightedFeeSum = 0;
+      let totalWeight = 0;
 
-    // Variação percentual diária de CMV (se for negativo é favorável/verde, se positivo é alerta/vermelho)
-    const costDeltaPct = Number((((hashSeed % 9) - 5) * 0.4).toFixed(1)); // ex: -0.8% ou +1.2%
-    const prevCost = Number((product.cost / (1 + costDeltaPct / 100)).toFixed(2));
-    const isCostFavorable = costDeltaPct <= 0; // redução de custo é positivo
+      targetList.forEach((p) => {
+        const units = Math.max(0, Number(p.estimatedMonthlyUnits) || 0);
+        const weight = hasPositiveUnits ? units : 1;
+        const price = Number(p.currentPrice) || 0;
+        const cost = Number(p.cost) || 0;
+        const unitFee = Number(((price * activeRateTab) / 100).toFixed(2));
 
-    // Variação percentual diária de lucro líquido (+2.5% a +5.0%)
-    const profitDeltaPct = Number((((hashSeed % 11) - 3) * 0.6 + 2.4).toFixed(1));
-    const prevProfit = Number((currentProfit / (1 + profitDeltaPct / 100)).toFixed(2));
+        sumUnits += units;
+        sumRevenue += price * units;
+        sumCost += cost * units;
+        sumFee += unitFee * units;
+
+        totalWeight += weight;
+        weightedPriceSum += price * weight;
+        weightedCostSum += cost * weight;
+        weightedFeeSum += unitFee * weight;
+      });
+
+      const safeWeight = totalWeight > 0 ? totalWeight : 1;
+      totalUnits = sumUnits;
+      realPrice = Number((weightedPriceSum / safeWeight).toFixed(2));
+      realCost = Number((weightedCostSum / safeWeight).toFixed(2));
+      realFee = Number((weightedFeeSum / safeWeight).toFixed(2));
+      realProfit = Number((realPrice - realCost - realFee).toFixed(2));
+      realMarginPct = realPrice > 0 ? (realProfit / realPrice) * 100 : 0;
+      monthlyCost = Number(sumCost.toFixed(2));
+      monthlyProfit = Number((sumRevenue - sumCost - sumFee).toFixed(2));
+    }
+
+    const sim30Price = sim30Row?.sellingPrice || 0;
+    const priceDiffPct =
+      sim30Price > 0 ? Number((((realPrice - sim30Price) / sim30Price) * 100).toFixed(1)) : 0;
+    const cmvSharePct = realPrice > 0 ? (realCost / realPrice) * 100 : 0;
 
     return {
-      price: {
-        label: 'Preço Médio Praticado',
-        current: currentPrice,
-        previous: prevPrice,
-        deltaPct: priceDeltaPct,
-        isPositive: priceDeltaPct >= 0,
-        sub: `Ontem: ${formatBRL(prevPrice)}`,
-        detail: `Margem ${targetRow?.marginLabel || '30%'}`,
-      },
-      margin: {
-        label: 'Margem Líquida Real',
-        current: currentMargin,
-        previous: prevMargin,
-        deltaPct: marginDeltaPct,
-        isPositive: marginDeltaPct >= 0,
-        sub: `Ontem: ${prevMargin.toFixed(1)}%`,
-        detail: `Taxa ${activeRateTab}% retida`,
-      },
-      cost: {
-        label: 'Custo Insumos (CMV)',
-        current: product.cost,
-        previous: prevCost,
-        deltaPct: costDeltaPct,
-        isPositive: isCostFavorable,
-        sub: `Ontem: ${formatBRL(prevCost)}`,
-        detail: `${((product.cost / (currentPrice || 1)) * 100).toFixed(1)}% do preço`,
-      },
-      profit: {
-        label: 'Lucro Líquido Unitário',
-        current: currentProfit,
-        previous: prevProfit,
-        deltaPct: profitDeltaPct,
-        isPositive: profitDeltaPct >= 0,
-        sub: `Ontem: ${formatBRL(prevProfit)}`,
-        detail: `No bolso após taxas`,
-      },
+      activeCount,
+      totalUnits,
+      realPrice,
+      sim30Price,
+      sim30Margin: sim30Row?.netMarginPercent || 0,
+      priceDiffPct,
+      realCost,
+      cmvSharePct,
+      monthlyCost,
+      realFee,
+      realProfit,
+      monthlyProfit,
+      realMarginPct,
     };
-  }, [product.id, product.cost, currentRows, activeRateTab]);
+  }, [product, products, isPortfolioMode, currentRows, activeRateTab]);
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xl relative overflow-hidden">
@@ -132,14 +205,21 @@ export const SpreadsheetMatrix: React.FC<SpreadsheetMatrixProps> = ({
               <Table className="w-5 h-5" />
             </span>
             <div>
-              <h2 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
+              <h2 className="text-lg font-bold text-white tracking-tight flex items-center gap-2 flex-wrap">
                 Matriz de Precificação & Auditoria de Margem Real
                 <span className="text-[11px] font-normal px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                   Planilha Excel Conectada
                 </span>
+                {isPortfolioMode && (
+                  <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                    Visão Geral: Média do Catálogo
+                  </span>
+                )}
               </h2>
               <p className="text-xs text-slate-400">
-                Comparativo idêntico à sua planilha, com auditoria instantânea do impacto das taxas sobre o lucro líquido.
+                {isPortfolioMode
+                  ? 'Comparativo consolidado baseado no CMV médio ponderado do catálogo ativo e impacto real das taxas.'
+                  : 'Comparativo idêntico à sua planilha, com auditoria instantânea do impacto das taxas sobre o lucro líquido.'}
               </p>
             </div>
           </div>
@@ -180,169 +260,166 @@ export const SpreadsheetMatrix: React.FC<SpreadsheetMatrixProps> = ({
         </div>
       </div>
 
-      {/* Cartões Executivos de Métricas de Precificação com Indicadores de Tendência Diária (vs. Dia Anterior) */}
+      {/* Explicação Clara quando em Modo Visão Geral */}
+      {isPortfolioMode && (
+        <div className="mt-5 p-3.5 rounded-2xl bg-cyan-500/10 border border-cyan-500/25 flex items-start gap-3">
+          <Info className="w-4 h-4 text-cyan-300 shrink-0 mt-0.5" />
+          <p className="text-xs text-slate-300 leading-relaxed">
+            <strong className="text-cyan-300">Como ler no modo Todos os Produtos:</strong> Os cartões abaixo exibem a{' '}
+            <strong className="text-white">média ponderada real</strong> dos preços praticados e CMV dos{' '}
+            <strong className="text-white">{executiveMetrics.activeCount} produtos ativos</strong> (ponderados pelo volume mensal de vendas). Já a tabela da planilha simula preços ideais para margens de 20% a 50% a partir desse CMV médio ({formatBRL(executiveMetrics.realCost)}).
+          </p>
+        </div>
+      )}
+
+      {/* Cartões Executivos de Métricas Reais de Precificação */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 my-5">
-        {/* Card 1: Preço Médio Praticado */}
+        {/* Card 1: Ticket Médio / Preço Praticado Real */}
         <div className="p-4 rounded-2xl bg-slate-950/70 border border-slate-800 hover:border-slate-700/80 transition-all shadow-md group">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              {dailyEvolution.price.label}
+              {isPortfolioMode ? 'Ticket Médio Praticado' : 'Preço Praticado Atual'}
             </span>
             <div
               className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-transform group-hover:scale-105 ${
-                dailyEvolution.price.isPositive
+                executiveMetrics.priceDiffPct >= 0
                   ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                  : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+                  : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
               }`}
-              title="Variação diária comparada ao dia anterior"
+              title="Diferença do preço praticado em relação à linha de 30% nominal da planilha"
             >
-              {dailyEvolution.price.isPositive ? (
+              {executiveMetrics.priceDiffPct >= 0 ? (
                 <TrendingUp className="w-3 h-3 text-emerald-400" />
               ) : (
-                <TrendingDown className="w-3 h-3 text-rose-400" />
+                <TrendingDown className="w-3 h-3 text-amber-300" />
               )}
               <span>
-                {dailyEvolution.price.deltaPct >= 0
-                  ? `+${dailyEvolution.price.deltaPct}%`
-                  : `${dailyEvolution.price.deltaPct}%`}
+                {executiveMetrics.priceDiffPct >= 0
+                  ? `+${executiveMetrics.priceDiffPct}%`
+                  : `${executiveMetrics.priceDiffPct}%`}{' '}
+                vs 30%
               </span>
             </div>
           </div>
-          <div className="mt-2 flex items-baseline justify-between">
+          <div className="mt-2 flex items-baseline justify-between gap-2">
             <span className="text-xl font-black text-white font-mono">
-              {formatBRL(dailyEvolution.price.current)}
+              {formatBRL(executiveMetrics.realPrice)}
             </span>
             <span className="text-[11px] text-slate-400 font-mono">
-              {dailyEvolution.price.sub}
+              Tab. 30%: {formatBRL(executiveMetrics.sim30Price)}
             </span>
           </div>
           <div className="mt-2.5 pt-2 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
-            <span>{dailyEvolution.price.detail}</span>
-            <span className="text-[10px] text-slate-400 font-medium">vs. dia anterior</span>
+            <span>
+              {isPortfolioMode
+                ? `Média real de ${executiveMetrics.activeCount} produtos`
+                : 'Preço atual no cardápio'}
+            </span>
+            <span className="text-[10px] text-slate-400 font-medium">
+              {isPortfolioMode
+                ? `${executiveMetrics.totalUnits.toLocaleString('pt-BR')} un/mês`
+                : `Meta ${(product.targetNetMargin * 100).toFixed(0)}%`}
+            </span>
           </div>
         </div>
 
         {/* Card 2: Margem Líquida Real */}
         <div className="p-4 rounded-2xl bg-slate-950/70 border border-slate-800 hover:border-slate-700/80 transition-all shadow-md group">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              {dailyEvolution.margin.label}
+              Margem Líquida Real
             </span>
             <div
-              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-transform group-hover:scale-105 ${
-                dailyEvolution.margin.isPositive
+              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                executiveMetrics.realMarginPct >= 20
                   ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                  : executiveMetrics.realMarginPct >= 10
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
                   : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
               }`}
-              title="Variação diária comparada ao dia anterior"
             >
-              {dailyEvolution.margin.isPositive ? (
-                <TrendingUp className="w-3 h-3 text-emerald-400" />
-              ) : (
-                <TrendingDown className="w-3 h-3 text-rose-400" />
-              )}
               <span>
-                {dailyEvolution.margin.deltaPct >= 0
-                  ? `+${dailyEvolution.margin.deltaPct}%`
-                  : `${dailyEvolution.margin.deltaPct}%`}
+                {executiveMetrics.realMarginPct >= 20
+                  ? 'Saudável'
+                  : executiveMetrics.realMarginPct >= 10
+                  ? 'Atenção'
+                  : 'Crítica'}
               </span>
             </div>
           </div>
-          <div className="mt-2 flex items-baseline justify-between">
+          <div className="mt-2 flex items-baseline justify-between gap-2">
             <span className="text-xl font-black text-cyan-300 font-mono">
-              {formatPercent(dailyEvolution.margin.current)}
+              {formatPercent(executiveMetrics.realMarginPct)}
             </span>
             <span className="text-[11px] text-slate-400 font-mono">
-              {dailyEvolution.margin.sub}
+              Tab. 30%: {formatPercent(executiveMetrics.sim30Margin)}
             </span>
           </div>
           <div className="mt-2.5 pt-2 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
-            <span>{dailyEvolution.margin.detail}</span>
-            <span className="text-[10px] text-slate-400 font-medium">vs. dia anterior</span>
+            <span>Taxa {activeRateTab.toFixed(2).replace('.', ',')}% retida</span>
+            <span className="text-[10px] text-slate-400 font-medium truncate max-w-[120px]">
+              {activeChannelOption.platformName}
+            </span>
           </div>
         </div>
 
         {/* Card 3: Custo Insumos CMV */}
         <div className="p-4 rounded-2xl bg-slate-950/70 border border-slate-800 hover:border-slate-700/80 transition-all shadow-md group">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              {dailyEvolution.cost.label}
+              {isPortfolioMode ? 'CMV Médio Ponderado' : 'Custo Insumos (CMV)'}
             </span>
-            <div
-              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-transform group-hover:scale-105 ${
-                dailyEvolution.cost.isPositive
-                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                  : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
-              }`}
-              title={
-                dailyEvolution.cost.isPositive
-                  ? 'Custo reduziu comparado a ontem (Favorável)'
-                  : 'Custo aumentou comparado a ontem (Alerta)'
-              }
-            >
-              {dailyEvolution.cost.deltaPct <= 0 ? (
-                <TrendingDown className="w-3 h-3 text-emerald-400" />
-              ) : (
-                <TrendingUp className="w-3 h-3 text-rose-400" />
-              )}
-              <span>
-                {dailyEvolution.cost.deltaPct > 0
-                  ? `+${dailyEvolution.cost.deltaPct}%`
-                  : `${dailyEvolution.cost.deltaPct}%`}
-              </span>
+            <div className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-slate-800 text-slate-300 border-slate-700 font-mono">
+              {executiveMetrics.cmvSharePct.toFixed(1)}% do preço
             </div>
           </div>
-          <div className="mt-2 flex items-baseline justify-between">
+          <div className="mt-2 flex items-baseline justify-between gap-2">
             <span className="text-xl font-black text-white font-mono">
-              {formatBRL(dailyEvolution.cost.current)}
+              {formatBRL(executiveMetrics.realCost)}
             </span>
             <span className="text-[11px] text-slate-400 font-mono">
-              {dailyEvolution.cost.sub}
+              {isPortfolioMode
+                ? `Mês: ${formatBRL(executiveMetrics.monthlyCost)}`
+                : 'Custo unitário'}
             </span>
           </div>
           <div className="mt-2.5 pt-2 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
-            <span>{dailyEvolution.cost.detail}</span>
-            <span className="text-[10px] text-slate-400 font-medium">vs. dia anterior</span>
+            <span>Peso médio dos insumos</span>
+            <span className="text-[10px] text-slate-400 font-medium">
+              {isPortfolioMode ? 'Catálogo ativo' : product.unit || 'un'}
+            </span>
           </div>
         </div>
 
         {/* Card 4: Lucro Líquido Unitário */}
         <div className="p-4 rounded-2xl bg-slate-950/70 border border-slate-800 hover:border-slate-700/80 transition-all shadow-md group">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              {dailyEvolution.profit.label}
+              {isPortfolioMode ? 'Lucro Líquido Médio / Un' : 'Lucro Líquido Unitário'}
             </span>
-            <div
-              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-transform group-hover:scale-105 ${
-                dailyEvolution.profit.isPositive
-                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                  : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
-              }`}
-              title="Variação diária comparada ao dia anterior"
-            >
-              {dailyEvolution.profit.isPositive ? (
-                <TrendingUp className="w-3 h-3 text-emerald-400" />
-              ) : (
-                <TrendingDown className="w-3 h-3 text-rose-400" />
-              )}
-              <span>
-                {dailyEvolution.profit.deltaPct >= 0
-                  ? `+${dailyEvolution.profit.deltaPct}%`
-                  : `${dailyEvolution.profit.deltaPct}%`}
-              </span>
+            <div className="px-2 py-0.5 rounded-full text-[10px] font-bold border bg-rose-500/15 text-rose-300 border-rose-500/30 font-mono">
+              Taxa -{formatBRL(executiveMetrics.realFee)}
             </div>
           </div>
-          <div className="mt-2 flex items-baseline justify-between">
-            <span className="text-xl font-black text-emerald-400 font-mono">
-              {formatBRL(dailyEvolution.profit.current)}
+          <div className="mt-2 flex items-baseline justify-between gap-2">
+            <span
+              className={`text-xl font-black font-mono ${
+                executiveMetrics.realProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'
+              }`}
+            >
+              {formatBRL(executiveMetrics.realProfit)}
             </span>
             <span className="text-[11px] text-slate-400 font-mono">
-              {dailyEvolution.profit.sub}
+              {isPortfolioMode
+                ? `Mês: ${formatBRL(executiveMetrics.monthlyProfit)}`
+                : 'Líquido no bolso'}
             </span>
           </div>
           <div className="mt-2.5 pt-2 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
-            <span>{dailyEvolution.profit.detail}</span>
-            <span className="text-[10px] text-slate-400 font-medium">vs. dia anterior</span>
+            <span>No bolso após taxas</span>
+            <span className="text-[10px] text-slate-400 font-medium truncate max-w-[130px]">
+              {activeChannelOption.label}
+            </span>
           </div>
         </div>
       </div>
@@ -354,7 +431,9 @@ export const SpreadsheetMatrix: React.FC<SpreadsheetMatrixProps> = ({
             <Sliders className="w-5 h-5" />
           </div>
           <div>
-            <div className="text-xs text-slate-400 font-medium">Custo de Produtos (CMV Unitário)</div>
+            <div className="text-xs text-slate-400 font-medium">
+              {isPortfolioMode ? 'Custo Médio Ponderado do Catálogo (CMV Unitário)' : 'Custo de Produtos (CMV Unitário)'}
+            </div>
             <div className="text-lg font-bold text-white flex items-center gap-2">
               {formatBRL(product.cost)}
               <span className="text-xs font-normal text-slate-500">
@@ -364,7 +443,7 @@ export const SpreadsheetMatrix: React.FC<SpreadsheetMatrixProps> = ({
           </div>
         </div>
 
-        {canEditCosts && (
+        {canEditCosts && !isPortfolioMode && (
           <div className="flex items-center gap-3 w-full sm:w-auto">
             <label className="text-xs text-slate-400 font-medium shrink-0">Ajustar Custo R$:</label>
             <input
@@ -376,45 +455,81 @@ export const SpreadsheetMatrix: React.FC<SpreadsheetMatrixProps> = ({
               className="w-28 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono text-sm focus:outline-none focus:border-emerald-500"
             />
             <button
-              onClick={() => onUpdateProductCost(6.89)}
-              className="text-xs text-slate-400 hover:text-emerald-400 underline"
-              title="Voltar ao custo original da planilha (R$ 6,89)"
+              type="button"
+              onClick={() => onUpdateProductCost(restoreCostValue)}
+              className="text-xs text-slate-400 hover:text-emerald-400 underline cursor-pointer"
+              title={`Restaurar custo original de ${formatBRL(restoreCostValue)}`}
             >
-              Resetar para 6,89
+              Restaurar ({formatBRL(restoreCostValue)})
             </button>
           </div>
         )}
       </div>
 
-      {/* Rate Tabs (Single View Mode) */}
+      {/* Rate Tabs (Single View Mode) with Expandable All-Rates Toggle */}
       {viewMode === 'single' && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
-          {presetRates.map((preset) => {
-            const isActive = activeRateTab === preset.rate;
-            return (
+        <div className="mb-4 space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs text-slate-400 font-medium">
+              Taxas Praticadas por Canal{' '}
+              <span className="text-slate-500 font-mono">
+                (exibindo {visibleRateCards.length} de {rateOptions.length})
+              </span>
+            </div>
+            {rateOptions.length > 4 && (
               <button
-                key={preset.rate}
-                onClick={() => setActiveRateTab(preset.rate)}
-                className={`p-3 rounded-2xl border text-left transition-all relative overflow-hidden ${
-                  isActive
-                    ? 'bg-gradient-to-br from-slate-800 to-slate-850 border-emerald-500/60 shadow-lg shadow-emerald-500/10'
-                    : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 hover:bg-slate-900/50'
-                }`}
+                onClick={() => setShowAllRates((prev) => !prev)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-500/30 text-xs font-semibold transition-all shadow-sm"
               >
-                <div className="flex items-center justify-between">
-                  <span className={`text-base font-bold font-mono ${isActive ? 'text-emerald-400' : 'text-slate-200'}`}>
-                    {preset.rate.toFixed(2).replace('.', ',')}%
-                  </span>
-                  {preset.isMax && (
-                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
-                      Uai Rango
-                    </span>
-                  )}
-                </div>
-                <div className="text-[11px] text-slate-400 mt-1 truncate">{preset.label}</div>
+                {showAllRates ? (
+                  <>
+                    <ChevronUp className="w-3.5 h-3.5" />
+                    <span>Recolher taxas (4 principais)</span>
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown className="w-3.5 h-3.5" />
+                    <span>Mostrar todas as taxas (+{rateOptions.length - 4})</span>
+                  </>
+                )}
               </button>
-            );
-          })}
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            {visibleRateCards.map((preset) => {
+              const isActive = activeChannelOption.id === preset.id;
+              return (
+                <button
+                  key={preset.id}
+                  onClick={() => setSelectedChannelId(preset.id)}
+                  className={`p-3 rounded-2xl border text-left transition-all relative overflow-hidden ${
+                    isActive
+                      ? 'bg-gradient-to-br from-slate-800 to-slate-850 border-emerald-500/60 shadow-lg shadow-emerald-500/10'
+                      : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 hover:bg-slate-900/50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className={`text-base font-bold font-mono ${isActive ? 'text-emerald-400' : 'text-slate-200'}`}>
+                      {preset.rate.toFixed(2).replace('.', ',')}%
+                    </span>
+                    {preset.isMax ? (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                        Maior Taxa
+                      </span>
+                    ) : (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700 truncate max-w-[90px]">
+                        {preset.platformName}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-300 mt-1 truncate" title={preset.label}>
+                    {preset.label}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -424,8 +539,11 @@ export const SpreadsheetMatrix: React.FC<SpreadsheetMatrixProps> = ({
         <div className="text-xs text-slate-300 leading-relaxed">
           <strong className="text-amber-300 font-semibold">Auditoria da Planilha:</strong> Quando você precifica com{' '}
           <strong className="text-white">Margem de 20% (divisor 0,8)</strong> gerando Preço de{' '}
-          <strong className="text-white">R$ 8,61</strong>, no canal com{' '}
-          <strong className="text-white">{activeRateTab}% de taxas</strong>, sobram apenas{' '}
+          <strong className="text-white">{formatBRL(currentRows[0]?.sellingPrice || 0)}</strong>, no canal{' '}
+          <strong className="text-white">
+            {activeChannelOption.label} ({activeRateTab.toFixed(2).replace('.', ',')}% de taxas)
+          </strong>
+          , sobram apenas{' '}
           <strong className="text-emerald-400 font-mono">
             {formatBRL(currentRows[0]?.netProfit || 0)} ({currentRows[0]?.netMarginPercent}%)
           </strong>{' '}
@@ -576,7 +694,7 @@ export const SpreadsheetMatrix: React.FC<SpreadsheetMatrixProps> = ({
                     {currentRows.map((col, idx) => (
                       <td key={idx} className="py-3 px-3.5 text-center font-bold text-emerald-300 text-sm">
                         {formatBRL(col.guaranteedShieldPrice)}
-                        {onApplyRecommendedPrice && (
+                        {onApplyRecommendedPrice && !isPortfolioMode && (
                           <button
                             onClick={() => onApplyRecommendedPrice(col.guaranteedShieldPrice)}
                             className="block mx-auto mt-1 text-[9px] font-sans px-2 py-0.5 rounded bg-emerald-500/30 hover:bg-emerald-500/50 text-emerald-200 transition-all"
@@ -604,25 +722,54 @@ export const SpreadsheetMatrix: React.FC<SpreadsheetMatrixProps> = ({
           </table>
         </div>
       ) : (
-        /* Multi-Rate Grid Comparison */
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {presetRates.map((preset) => {
-            const rows = getRowsForRate(preset.rate);
-            return (
-              <div key={preset.rate} className="bg-slate-950/60 rounded-2xl border border-slate-800 p-4">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-3">
-                  <div>
-                    <span className="text-sm font-bold text-white font-mono">
-                      {preset.rate.toFixed(2).replace('.', ',')}% de Taxas
-                    </span>
-                    <span className="text-xs text-slate-400 block">{preset.label}</span>
+        /* Multi-Rate Grid Comparison (All Configured Channels) */
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs text-slate-400 font-medium">
+              Comparativo completo de todos os{' '}
+              <strong className="text-white">{showAllRates ? rateOptions.length : visibleRateCards.length}</strong>{' '}
+              canais e taxas
+            </span>
+            {rateOptions.length > 4 && (
+              <button
+                onClick={() => setShowAllRates((prev) => !prev)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-500/30 text-xs font-semibold transition-all shadow-sm"
+              >
+                {showAllRates ? (
+                  <>
+                    <ChevronUp className="w-3.5 h-3.5" />
+                    <span>Recolher para 4 principais</span>
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown className="w-3.5 h-3.5" />
+                    <span>Expandir e mostrar todas ({rateOptions.length} taxas)</span>
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {(showAllRates ? rateOptions : visibleRateCards).map((preset) => {
+              const rows = getRowsForRate(preset.rate);
+              return (
+                <div key={preset.id} className="bg-slate-950/60 rounded-2xl border border-slate-800 p-4">
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-3">
+                    <div>
+                      <span className="text-sm font-bold text-white font-mono">
+                        {preset.rate.toFixed(2).replace('.', ',')}% de Taxas
+                      </span>
+                      <span className="text-xs text-slate-400 block">
+                        {preset.label} • {preset.platformName}
+                      </span>
+                    </div>
+                    {preset.isMax && (
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-semibold border border-rose-500/30">
+                        Maior Taxa
+                      </span>
+                    )}
                   </div>
-                  {preset.isMax && (
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-semibold border border-rose-500/30">
-                      Maior Taxa
-                    </span>
-                  )}
-                </div>
 
                 <div className="overflow-x-auto">
                   <table className="w-full text-[11px] text-left border-collapse">
@@ -661,6 +808,7 @@ export const SpreadsheetMatrix: React.FC<SpreadsheetMatrixProps> = ({
               </div>
             );
           })}
+          </div>
         </div>
       )}
     </div>

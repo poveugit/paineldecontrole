@@ -60,6 +60,7 @@ export const FeesManagementScreen: React.FC<FeesManagementScreenProps> = ({
 
   // Simulator State across full screen
   const [simulatedMonthlyRevenue, setSimulatedMonthlyRevenue] = useState(30000);
+  const [showAllSimChannels, setShowAllSimChannels] = useState(false);
 
   const canEdit = currentUser.permissions.canEditFees;
 
@@ -843,8 +844,22 @@ export const FeesManagementScreen: React.FC<FeesManagementScreenProps> = ({
         </div>
 
         {/* Comparative Full-Width Horizontal Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 pt-2">
-          {localChannels.slice(0, 4).map((channel) => {
+        <div className="flex items-center justify-between gap-2 pt-1">
+          <span className="text-xs text-slate-400">
+            Exibindo {showAllSimChannels ? localChannels.length : Math.min(4, localChannels.length)} de {localChannels.length} canais configurados
+          </span>
+          {localChannels.length > 4 && (
+            <button
+              type="button"
+              onClick={() => setShowAllSimChannels((prev) => !prev)}
+              className="text-xs font-semibold text-cyan-300 hover:text-cyan-200 underline cursor-pointer"
+            >
+              {showAllSimChannels ? 'Recolher canais (4 principais)' : `Mostrar todos os canais (+${localChannels.length - 4})`}
+            </button>
+          )}
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
+          {(showAllSimChannels ? localChannels : localChannels.slice(0, 4)).map((channel) => {
             const feeCost = (simulatedMonthlyRevenue * channel.totalRate) / 100;
             const netDeposit = simulatedMonthlyRevenue - feeCost;
 

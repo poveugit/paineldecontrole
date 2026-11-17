@@ -19,6 +19,8 @@ import { formatBRL, formatPercent } from '../utils/pricingEngine';
 interface ChannelComparisonWidgetProps {
   channels: ChannelFee[];
   product: ProductItem;
+  products?: ProductItem[];
+  isPortfolioMode?: boolean;
   canEditFees: boolean;
   onUpdateChannelFee: (id: string, newTotalRate: number) => void;
 }
@@ -26,27 +28,35 @@ interface ChannelComparisonWidgetProps {
 export const ChannelComparisonWidget: React.FC<ChannelComparisonWidgetProps> = ({
   channels,
   product,
+  products = [],
+  isPortfolioMode = false,
   canEditFees,
   onUpdateChannelFee,
 }) => {
   const [selectedPlatform, setSelectedPlatform] = useState<string>('all');
-  const [testPrice, setTestPrice] = useState<number>(product.currentPrice || 9.84);
+  const [testPrice, setTestPrice] = useState<number>(Number(product.currentPrice) || 0);
 
   useEffect(() => {
-    setTestPrice(product.currentPrice || 9.84);
+    setTestPrice(Number(product.currentPrice) || 0);
   }, [product.id, product.currentPrice]);
+
+  const activeProducts = products.filter((p) => p.active !== false);
+  const portfolioList = activeProducts.length > 0 ? activeProducts : products;
+  const usePortfolioAggregate = isPortfolioMode && portfolioList.length > 0;
 
   const filteredChannels =
     selectedPlatform === 'all' ? channels : channels.filter((c) => c.platform === selectedPlatform);
 
-  // Group by platform
-  const platforms = [
-    { key: 'all', name: 'Todos os Canais' },
-    { key: 'uai_rango', name: 'Uai Rango' },
-    { key: 'tchau_fome', name: 'Tchau Fome' },
-    { key: 'ifood', name: 'iFood Básico' },
-    { key: 'balcao', name: 'Balcão / Direto' },
-  ];
+  // Group dynamically by configured platforms
+  const platforms = React.useMemo(() => {
+    const map = new Map<string, string>();
+    channels.forEach((c) => {
+      if (!map.has(c.platform)) {
+        map.set(c.platform, c.platformName);
+      }
+    });
+    return [{ key: 'all', name: 'Todos os Canais' }, ...Array.from(map.entries()).map(([key, name]) => ({ key, name }))];
+  }, [channels]);
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xl relative overflow-hidden">
@@ -60,18 +70,29 @@ export const ChannelComparisonWidget: React.FC<ChannelComparisonWidgetProps> = (
             <Layers className="w-5 h-5" />
           </div>
           <div>
-            <h2 className="text-base font-bold text-white tracking-tight">
-              Comparativo de Canais & Meios de Pagamento
-            </h2>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-base font-bold text-white tracking-tight">
+                Comparativo de Canais & Meios de Pagamento
+              </h2>
+              {usePortfolioAggregate && (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                  Todo o Catálogo ({portfolioList.length} itens)
+                </span>
+              )}
+            </div>
             <p className="text-xs text-slate-400">
-              Veja quanto sobra líquido na conta bancária ao vender o mesmo produto em cada aplicativo.
+              {usePortfolioAggregate
+                ? 'Veja o resultado consolidado mensal de todo o seu cardápio em cada aplicativo e meio de pagamento.'
+                : 'Veja quanto sobra líquido na conta bancária ao vender o mesmo produto em cada aplicativo.'}
             </p>
           </div>
         </div>
 
         {/* Test Price Simulator */}
         <div className="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800">
-          <span className="text-xs text-slate-400">Preço de Venda Simulado:</span>
+          <span className="text-xs text-slate-400">
+            {usePortfolioAggregate ? 'Ticket Médio Simulado:' : 'Preço de Venda Simulado:'}
+          </span>
           <span className="text-xs font-mono font-bold text-emerald-400">{formatBRL(testPrice)}</span>
           <input
             type="range"
@@ -105,9 +126,26 @@ export const ChannelComparisonWidget: React.FC<ChannelComparisonWidgetProps> = (
       {/* Channel Comparison Cards Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {filteredChannels.map((channel) => {
-          const feeValue = testPrice * (channel.totalRate / 100);
-          const netProfit = testPrice - product.cost - feeValue;
-          const netMarginPct = testPrice > 0 ? (netProfit / testPrice) * 100 : 0;
+          const feeValue = usePortfolioAggregate
+            ? portfolioList.reduce((acc, p) => {
+                const u = Math.max(0, Number(p.estimatedMonthlyUnits) || 0);
+                return acc + ((Number(p.currentPrice) || 0) * (channel.totalRate / 100)) * u;
+              }, 0)
+            : testPrice * (channel.totalRate / 100);
+          const costValue = usePortfolioAggregate
+            ? portfolioList.reduce((acc, p) => {
+                const u = Math.max(0, Number(p.estimatedMonthlyUnits) || 0);
+                return acc + (Number(p.cost) || 0) * u;
+              }, 0)
+            : Number(product.cost) || 0;
+          const grossValue = usePortfolioAggregate
+            ? portfolioList.reduce((acc, p) => {
+                const u = Math.max(0, Number(p.estimatedMonthlyUnits) || 0);
+                return acc + (Number(p.currentPrice) || 0) * u;
+              }, 0)
+            : testPrice;
+          const netProfit = grossValue - costValue - feeValue;
+          const netMarginPct = grossValue > 0 ? (netProfit / grossValue) * 100 : 0;
           const isCritical = netMarginPct < 8;
 
           return (
@@ -147,15 +185,17 @@ export const ChannelComparisonWidget: React.FC<ChannelComparisonWidgetProps> = (
               {/* Financial Outcome */}
               <div className="mt-4 pt-3 border-t border-slate-800/80 space-y-1.5 text-xs font-mono">
                 <div className="flex items-center justify-between text-slate-400 text-[11px]">
-                  <span>Taxa Retida:</span>
+                  <span>{usePortfolioAggregate ? 'Taxas (Mês):' : 'Taxa Retida:'}</span>
                   <span className="text-rose-400">- {formatBRL(feeValue)}</span>
                 </div>
                 <div className="flex items-center justify-between text-slate-400 text-[11px]">
-                  <span>Custo CMV:</span>
-                  <span>- {formatBRL(product.cost)}</span>
+                  <span>{usePortfolioAggregate ? 'CMV Total (Mês):' : 'Custo CMV:'}</span>
+                  <span>- {formatBRL(costValue)}</span>
                 </div>
                 <div className="flex items-center justify-between font-bold pt-1 border-t border-slate-850">
-                  <span className="text-slate-200">Lucro Líquido:</span>
+                  <span className="text-slate-200">
+                    {usePortfolioAggregate ? 'Lucro Mês:' : 'Lucro Líquido:'}
+                  </span>
                   <span className={netProfit > 0 ? 'text-emerald-400' : 'text-rose-400'}>
                     {formatBRL(netProfit)}
                   </span>

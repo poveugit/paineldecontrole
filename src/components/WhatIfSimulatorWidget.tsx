@@ -34,26 +34,35 @@ export const WhatIfSimulatorWidget: React.FC<WhatIfSimulatorWidgetProps> = ({
   onApplyPrice,
   preferredChannelId,
 }) => {
-  // Variables state
-  const [cost, setCost] = useState<number>(product.cost);
-  const [selectedChannelId, setSelectedChannelId] = useState<string>(
-    preferredChannelId || product.referenceChannelId || channels[0]?.id || 'uai-online'
+  const initialChannel =
+    channels.find((c) => c.id === (preferredChannelId || product.referenceChannelId)) || channels[0];
+
+  // Variables state (derived strictly from real product & channel data)
+  const [cost, setCost] = useState<number>(Number(product.cost) || 0);
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(initialChannel?.id || '');
+  const [customAppFee, setCustomAppFee] = useState<number>(initialChannel?.breakdown.appBase || 0);
+  const [paymentGatewayFee, setPaymentGatewayFee] = useState<number>(
+    initialChannel?.breakdown.paymentGateway || initialChannel?.breakdown.machineRate || 0
   );
-  const [customAppFee, setCustomAppFee] = useState<number>(12.0); // % app
-  const [paymentGatewayFee, setPaymentGatewayFee] = useState<number>(3.5); // % gateway
-  const [anticipationFee, setAnticipationFee] = useState<number>(1.99); // % antecipacao
-  const [deliverySubsidy, setDeliverySubsidy] = useState<number>(0.0); // R$ frete subsidiado
-  const [packagingCost, setPackagingCost] = useState<number>(0.60); // R$ embalagem
-  const [targetMargin, setTargetMargin] = useState<number>(25); // % margem liquida desejada
-  const [monthlyUnits, setMonthlyUnits] = useState<number>(product.estimatedMonthlyUnits || 350);
+  const [anticipationFee, setAnticipationFee] = useState<number>(initialChannel?.breakdown.anticipation || 0);
+  const [deliverySubsidy, setDeliverySubsidy] = useState<number>(0);
+  const [packagingCost, setPackagingCost] = useState<number>(0);
+  const [targetMargin, setTargetMargin] = useState<number>(
+    Math.round((Number(product.targetNetMargin) || 0.25) * 100)
+  );
+  const [monthlyUnits, setMonthlyUnits] = useState<number>(
+    Math.max(0, Number(product.estimatedMonthlyUnits) || 0)
+  );
+  const [showAllChannels, setShowAllChannels] = useState<boolean>(false);
 
   useEffect(() => {
-    setCost(product.cost);
-    setMonthlyUnits(product.estimatedMonthlyUnits || 350);
-  }, [product.id, product.cost, product.estimatedMonthlyUnits]);
+    setCost(Number(product.cost) || 0);
+    setMonthlyUnits(Math.max(0, Number(product.estimatedMonthlyUnits) || 0));
+    setTargetMargin(Math.round((Number(product.targetNetMargin) || 0.25) * 100));
+  }, [product.id, product.cost, product.estimatedMonthlyUnits, product.targetNetMargin]);
 
   useEffect(() => {
-    const nextChannelId = preferredChannelId || product.referenceChannelId;
+    const nextChannelId = preferredChannelId || product.referenceChannelId || channels[0]?.id;
     if (nextChannelId) {
       const ch = channels.find((c) => c.id === nextChannelId);
       if (ch) {
@@ -65,37 +74,23 @@ export const WhatIfSimulatorWidget: React.FC<WhatIfSimulatorWidgetProps> = ({
     }
   }, [preferredChannelId, product.id, product.referenceChannelId, channels]);
 
-  // Saved scenarios for instant comparison
-  const [savedScenarios, setSavedScenarios] = useState<WhatIfScenario[]>([
-    {
-      id: 'scen-1',
-      name: 'Cenário Base (Uai Rango Online)',
-      productCost: 6.89,
-      channelFeeRate: 17.49,
-      deliverySubsidy: 0,
-      packagingCost: 0.60,
-      targetNetMargin: 0.20,
-      monthlyUnits: 350,
-      calculatedPrice: 11.95,
-      calculatedNetProfit: 2.39,
-      calculatedMonthlyProfit: 836.50,
-      calculatedMarginPercent: 20.0,
-    },
-    {
-      id: 'scen-2',
-      name: 'Cenário Balcão / Pix Direto',
-      productCost: 6.89,
-      channelFeeRate: 1.0,
-      deliverySubsidy: 0,
-      packagingCost: 0.30,
-      targetNetMargin: 0.30,
-      monthlyUnits: 200,
-      calculatedPrice: 10.42,
-      calculatedNetProfit: 3.13,
-      calculatedMonthlyProfit: 626.00,
-      calculatedMarginPercent: 30.0,
-    },
-  ]);
+  // Saved scenarios persisted in localStorage (no fake seeded items)
+  const [savedScenarios, setSavedScenarios] = useState<WhatIfScenario[]>(() => {
+    try {
+      const saved = localStorage.getItem('omniprice_whatif_scenarios');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('omniprice_whatif_scenarios', JSON.stringify(savedScenarios));
+    } catch {
+      // Ignore storage errors
+    }
+  }, [savedScenarios]);
 
   // Synchronize when a preset channel is picked
   const handleSelectChannel = (channelId: string) => {
@@ -239,21 +234,33 @@ export const WhatIfSimulatorWidget: React.FC<WhatIfSimulatorWidgetProps> = ({
         <div className="lg:col-span-7 space-y-4">
           {/* Quick Preset Selector */}
           <div className="p-3 rounded-2xl bg-slate-950/70 border border-slate-800">
-            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">
-              Canal de Venda Base
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                Canal de Venda Base ({showAllChannels ? channels.length : Math.min(4, channels.length)} de {channels.length})
+              </div>
+              {channels.length > 4 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllChannels((prev) => !prev)}
+                  className="text-[11px] font-semibold text-amber-300 hover:text-amber-200 underline cursor-pointer"
+                >
+                  {showAllChannels ? 'Recolher canais' : `Mostrar todos (+${channels.length - 4})`}
+                </button>
+              )}
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {channels.slice(0, 4).map((ch) => (
+              {(showAllChannels ? channels : channels.slice(0, 4)).map((ch) => (
                 <button
                   key={ch.id}
+                  type="button"
                   onClick={() => handleSelectChannel(ch.id)}
-                  className={`p-2 rounded-xl text-left border text-xs transition-all ${
+                  className={`p-2 rounded-xl text-left border text-xs transition-all cursor-pointer ${
                     selectedChannelId === ch.id
                       ? 'bg-amber-500/20 text-white border-amber-500/50 font-semibold'
                       : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white'
                   }`}
                 >
-                  <div className="truncate font-medium">{ch.platformName}</div>
+                  <div className="truncate font-medium">{ch.name}</div>
                   <div className="font-mono text-[10px] text-amber-400">{ch.totalRate}% taxa</div>
                 </button>
               ))}
@@ -273,8 +280,8 @@ export const WhatIfSimulatorWidget: React.FC<WhatIfSimulatorWidgetProps> = ({
               </div>
               <input
                 type="range"
-                min="1.0"
-                max="30.0"
+                min="0"
+                max={Math.max(50, Math.ceil((product.cost || 10) * 2.5))}
                 step="0.10"
                 value={cost}
                 onChange={(e) => setCost(parseFloat(e.target.value))}
@@ -385,11 +392,11 @@ export const WhatIfSimulatorWidget: React.FC<WhatIfSimulatorWidgetProps> = ({
               </div>
               <input
                 type="range"
-                min="50"
-                max="2000"
-                step="50"
+                min="0"
+                max={Math.max(2000, Math.ceil((product.estimatedMonthlyUnits || 500) * 2))}
+                step="10"
                 value={monthlyUnits}
-                onChange={(e) => setMonthlyUnits(parseInt(e.target.value))}
+                onChange={(e) => setMonthlyUnits(parseInt(e.target.value, 10))}
                 className="w-full accent-cyan-400 cursor-pointer"
               />
             </div>

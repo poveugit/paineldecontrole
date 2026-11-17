@@ -19,6 +19,7 @@ interface CommercialChannelManagerWidgetProps {
   product: ProductItem;
   onOpenFeeManager: () => void;
   canEditFees: boolean;
+  isPortfolioMode?: boolean;
 }
 
 export const CommercialChannelManagerWidget: React.FC<CommercialChannelManagerWidgetProps> = ({
@@ -26,6 +27,7 @@ export const CommercialChannelManagerWidget: React.FC<CommercialChannelManagerWi
   product,
   onOpenFeeManager,
   canEditFees,
+  isPortfolioMode = false,
 }) => {
   const [simulationGrossSales, setSimulationGrossSales] = useState<number>(5000);
 
@@ -146,7 +148,11 @@ export const CommercialChannelManagerWidget: React.FC<CommercialChannelManagerWi
 
               <div className="pt-2 text-[11px] text-slate-400 space-y-1">
                 <div className="flex items-center justify-between text-[10px] text-slate-500">
-                  <span>Margem no Smash (R$ {product.currentPrice.toFixed(2)}):</span>
+                  <span className="truncate max-w-[180px]" title={product.name}>
+                    {isPortfolioMode
+                      ? `Margem Média Catálogo (R$ ${product.currentPrice.toFixed(2)}):`
+                      : `Margem em ${product.name.split(' ')[0]} (R$ ${product.currentPrice.toFixed(2)}):`}
+                  </span>
                   <span className="font-mono font-bold text-white">
                     {(
                       ((product.currentPrice - product.cost - (product.currentPrice * ch.totalRate) / 100) /

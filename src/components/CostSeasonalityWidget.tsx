@@ -29,84 +29,106 @@ import { formatBRL, formatPercent } from '../utils/pricingEngine';
 
 interface CostSeasonalityWidgetProps {
   product: ProductItem;
+  activeChannelRate?: number;
+  isPortfolioMode?: boolean;
 }
 
-type IngredientCategory = 'total' | 'carne' | 'queijo' | 'batata' | 'embalagem';
-
-export const CostSeasonalityWidget: React.FC<CostSeasonalityWidgetProps> = ({ product }) => {
-  const [selectedIngredient, setSelectedIngredient] = useState<IngredientCategory>('total');
-
-  // Annual seasonal variations by ingredient (12 months)
-  const seasonalityProfiles: Record<
-    IngredientCategory,
-    {
+export const CostSeasonalityWidget: React.FC<CostSeasonalityWidgetProps> = ({
+  product,
+  activeChannelRate = 17.49,
+  isPortfolioMode = false,
+}) => {
+  const ingredientProfiles = useMemo(() => {
+    const baseTotal = Number(product.cost) || 0;
+    const list: Array<{
+      id: string;
+      shortName: string;
       title: string;
       baseCost: number;
       bestMonths: string[];
       peakMonths: string[];
       insight: string;
       multipliers: number[];
-    }
-  > = {
-    total: {
-      title: 'CMV Total do Hambúrguer',
-      baseCost: product.cost,
-      bestMonths: ['Março', 'Abril', 'Maio'],
-      peakMonths: ['Novembro', 'Dezembro'],
-      insight: 'O custo total sobe até 14% no último trimestre devido à pressão combinada de carnes e embalagens.',
-      multipliers: [0.98, 0.96, 0.93, 0.92, 0.94, 0.97, 1.01, 1.02, 1.03, 1.06, 1.12, 1.14],
-    },
-    carne: {
-      title: 'Blend Bovino Smash (Peito / Acém / Fraldinha)',
-      baseCost: Number((product.cost * 0.58).toFixed(2)), // ~58% do custo
-      bestMonths: ['Março', 'Abril'],
-      peakMonths: ['Outubro', 'Novembro', 'Dezembro'],
-      insight: 'Entressafra do boi gordo e alta demanda de confraternizações inflam o preço em até 18% no final do ano. Negocie contratos em Março.',
-      multipliers: [0.97, 0.95, 0.91, 0.90, 0.93, 0.96, 1.00, 1.03, 1.06, 1.10, 1.16, 1.18],
-    },
-    queijo: {
-      title: 'Queijo Cheddar & Laticínios',
-      baseCost: Number((product.cost * 0.22).toFixed(2)), // ~22% do custo
-      bestMonths: ['Novembro', 'Dezembro', 'Janeiro'],
-      peakMonths: ['Junho', 'Julho', 'Agosto'],
-      insight: 'A entressafra do leite no inverno (seca nas pastagens) encarece queijos e manteiga em até 15% no meio do ano.',
-      multipliers: [0.92, 0.93, 0.96, 0.98, 1.05, 1.12, 1.15, 1.11, 1.04, 0.98, 0.94, 0.91],
-    },
-    batata: {
-      title: 'Batata & Óleo Vegetal de Fritura',
-      baseCost: 3.40,
-      bestMonths: ['Agosto', 'Setembro'],
-      peakMonths: ['Janeiro', 'Fevereiro', 'Março'],
-      insight: 'Chuvas de verão prejudicam a colheita da safra das águas, elevando o preço da batata no 1º trimestre.',
-      multipliers: [1.14, 1.16, 1.12, 1.04, 0.99, 0.96, 0.92, 0.89, 0.90, 0.95, 1.02, 1.08],
-    },
-    embalagem: {
-      title: 'Embalagens Térmicas & Papel Kraft',
-      baseCost: 0.80,
-      bestMonths: ['Fevereiro', 'Março', 'Abril'],
-      peakMonths: ['Novembro', 'Dezembro'],
-      insight: 'Demanda de Black Friday e Natal pressiona fábricas de papel e plástico. Antecipe compras de caixas em Julho/Agosto.',
-      multipliers: [0.98, 0.95, 0.94, 0.94, 0.96, 0.97, 0.99, 1.01, 1.04, 1.08, 1.15, 1.18],
-    },
-  };
+    }> = [
+      {
+        id: 'total',
+        shortName: isPortfolioMode ? 'CMV Médio Catálogo' : 'CMV Total',
+        title: isPortfolioMode
+          ? `CMV Médio Ponderado (${product.name})`
+          : `CMV Total — ${product.name}`,
+        baseCost: baseTotal,
+        bestMonths: ['Março', 'Abril', 'Maio'],
+        peakMonths: ['Novembro', 'Dezembro'],
+        insight:
+          'Referência sazonal de compras para simular o impacto de oscilações de safra e demanda sobre o CMV real atual.',
+        multipliers: [0.98, 0.96, 0.93, 0.92, 0.94, 0.97, 1.01, 1.02, 1.03, 1.06, 1.12, 1.14],
+      },
+    ];
 
-  const activeProfile = seasonalityProfiles[selectedIngredient];
+    if (!isPortfolioMode && product.ingredients && product.ingredients.length > 0) {
+      product.ingredients.slice(0, 6).forEach((ing, idx) => {
+        const isDairy = /queijo|mussarela|cheddar|requeij|leite|manteiga|creme/i.test(ing.name);
+        const isProduce = /batata|tomate|alface|cebola|hortifr|legume|fruta|oleo|óleo/i.test(ing.name);
+        const isPackaging = /embalag|caixa|pote|sacola|copo|guardanapo|canudo/i.test(ing.name);
+
+        const multipliers = isDairy
+          ? [0.92, 0.93, 0.96, 0.98, 1.05, 1.12, 1.15, 1.11, 1.04, 0.98, 0.94, 0.91]
+          : isProduce
+          ? [1.14, 1.16, 1.12, 1.04, 0.99, 0.96, 0.92, 0.89, 0.90, 0.95, 1.02, 1.08]
+          : isPackaging
+          ? [0.98, 0.95, 0.94, 0.94, 0.96, 0.97, 0.99, 1.01, 1.04, 1.08, 1.15, 1.18]
+          : [0.97, 0.95, 0.92, 0.91, 0.94, 0.97, 1.0, 1.03, 1.05, 1.08, 1.14, 1.16];
+
+        const bestMonths = isDairy
+          ? ['Novembro', 'Dezembro', 'Janeiro']
+          : isProduce
+          ? ['Agosto', 'Setembro']
+          : ['Março', 'Abril'];
+
+        const peakMonths = isDairy
+          ? ['Junho', 'Julho', 'Agosto']
+          : isProduce
+          ? ['Janeiro', 'Fevereiro', 'Março']
+          : ['Novembro', 'Dezembro'];
+
+        list.push({
+          id: ing.id || `ing-${idx}`,
+          shortName: ing.name.split(' ').slice(0, 2).join(' '),
+          title: `${ing.name} (${ing.quantity} ${ing.unit})`,
+          baseCost: Number(ing.subtotal) || 0,
+          bestMonths,
+          peakMonths,
+          insight: `Simulação sazonal aplicada sobre o custo real cadastrado de ${formatBRL(Number(ing.subtotal) || 0)} deste insumo na ficha técnica.`,
+          multipliers,
+        });
+      });
+    }
+
+    return list;
+  }, [product, isPortfolioMode]);
+
+  const [selectedProfileId, setSelectedProfileId] = useState<string>('total');
+
+  const activeProfile =
+    ingredientProfiles.find((p) => p.id === selectedProfileId) || ingredientProfiles[0];
 
   const monthNames = [
     'Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun',
     'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez',
   ];
 
-  // Generate 12-month timeline series
+  const targetMarginRatio =
+    product.targetNetMargin > 0 && product.targetNetMargin < 0.7 ? product.targetNetMargin : 0.25;
+  const channelFeeRatio = (Number(activeChannelRate) || 0) / 100;
+  const shieldDivisor = Math.max(0.15, 1 - targetMarginRatio - channelFeeRatio);
+
+  // Generate 12-month seasonal stress curve over REAL product/ingredient cost
   const seasonalSeries = useMemo(() => {
     return monthNames.map((month, idx) => {
       const multiplier = activeProfile.multipliers[idx];
       const monthlyCost = Number((activeProfile.baseCost * multiplier).toFixed(2));
       const variationPct = Number(((multiplier - 1) * 100).toFixed(1));
-      
-      // Preço de venda sugerido para manter margem constante de 25% com taxa de 12%
-      // Preço = Custo / (1 - 0.25 - 0.12) = Custo / 0.63
-      const suggestedPrice = Number((monthlyCost / 0.63).toFixed(2));
+      const suggestedPrice = Number((monthlyCost / shieldDivisor).toFixed(2));
 
       const isBest = activeProfile.bestMonths.some((m) => m.toLowerCase().startsWith(month.toLowerCase()));
       const isPeak = activeProfile.peakMonths.some((m) => m.toLowerCase().startsWith(month.toLowerCase()));
@@ -121,11 +143,11 @@ export const CostSeasonalityWidget: React.FC<CostSeasonalityWidgetProps> = ({ pr
         status: isBest ? 'Safra / Compra Ideal' : isPeak ? 'Pico de Alta' : 'Normal',
       };
     });
-  }, [activeProfile]);
+  }, [activeProfile, shieldDivisor]);
 
   const minCost = Math.min(...seasonalSeries.map((s) => s.monthlyCost));
   const maxCost = Math.max(...seasonalSeries.map((s) => s.monthlyCost));
-  const potentialSavingsPct = Number((((maxCost - minCost) / maxCost) * 100).toFixed(1));
+  const potentialSavingsPct = maxCost > 0 ? Number((((maxCost - minCost) / maxCost) * 100).toFixed(1)) : 0;
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xl relative overflow-hidden">
@@ -139,72 +161,36 @@ export const CostSeasonalityWidget: React.FC<CostSeasonalityWidgetProps> = ({ pr
             <Calendar className="w-5 h-5" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-base font-bold text-white tracking-tight">
-                Análise de Sazonalidade de Custos & Janela de Compras
+                Simulador Sazonal de Custos & Janela de Compras
               </h2>
               <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-teal-500/10 text-teal-300 border border-teal-500/20 font-mono">
-                Série Temporal 12 Meses
+                {isPortfolioMode ? 'Base: CMV Médio Catálogo' : 'Base: Ficha Técnica Real'}
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              Histórico anual de oscilação dos insumos para antecipação de compras e proteção de margem.
+              Projeção sazonal sobre o custo real cadastrado ({formatBRL(activeProfile.baseCost)}) mantendo meta de {(targetMarginRatio * 100).toFixed(0)}% com taxa de {activeChannelRate.toFixed(2).replace('.', ',')}%.
             </p>
           </div>
         </div>
 
-        {/* Category Switcher */}
-        <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs overflow-x-auto">
-          <button
-            onClick={() => setSelectedIngredient('total')}
-            className={`px-3 py-1 rounded-lg transition-all shrink-0 ${
-              selectedIngredient === 'total'
-                ? 'bg-teal-600 text-white font-semibold'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            CMV Total
-          </button>
-          <button
-            onClick={() => setSelectedIngredient('carne')}
-            className={`px-3 py-1 rounded-lg transition-all shrink-0 ${
-              selectedIngredient === 'carne'
-                ? 'bg-teal-600 text-white font-semibold'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            Carne Blend
-          </button>
-          <button
-            onClick={() => setSelectedIngredient('queijo')}
-            className={`px-3 py-1 rounded-lg transition-all shrink-0 ${
-              selectedIngredient === 'queijo'
-                ? 'bg-teal-600 text-white font-semibold'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            Queijos
-          </button>
-          <button
-            onClick={() => setSelectedIngredient('batata')}
-            className={`px-3 py-1 rounded-lg transition-all shrink-0 ${
-              selectedIngredient === 'batata'
-                ? 'bg-teal-600 text-white font-semibold'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            Batatas
-          </button>
-          <button
-            onClick={() => setSelectedIngredient('embalagem')}
-            className={`px-3 py-1 rounded-lg transition-all shrink-0 ${
-              selectedIngredient === 'embalagem'
-                ? 'bg-teal-600 text-white font-semibold'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            Embalagens
-          </button>
+        {/* Dynamic Ingredient Switcher */}
+        <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs overflow-x-auto max-w-full">
+          {ingredientProfiles.map((prof) => (
+            <button
+              key={prof.id}
+              onClick={() => setSelectedProfileId(prof.id)}
+              className={`px-3 py-1 rounded-lg transition-all shrink-0 ${
+                activeProfile.id === prof.id
+                  ? 'bg-teal-600 text-white font-semibold'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+              title={prof.title}
+            >
+              {prof.shortName}
+            </button>
+          ))}
         </div>
       </div>
 

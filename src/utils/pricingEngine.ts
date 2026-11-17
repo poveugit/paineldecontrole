@@ -382,48 +382,7 @@ export const INITIAL_FIXED_EXPENSES: FixedExpenses = {
   totalWithProfit: 50.0,
 };
 
-export const INITIAL_COMPETITORS: CompetitorItem[] = [
-  {
-    id: 'comp-1',
-    name: 'Burger Brothers Smash',
-    platform: 'iFood',
-    price: 9.90,
-    lastUpdated: 'Hoje, 10:15',
-    distanceKm: 1.2,
-    differenceToUs: 0.6,
-    threatLevel: 'medium',
-  },
-  {
-    id: 'comp-2',
-    name: 'Casa do Burger Delivery',
-    platform: 'Uai Rango',
-    price: 11.50,
-    lastUpdated: 'Ontem',
-    distanceKm: 2.4,
-    differenceToUs: 16.8,
-    threatLevel: 'low',
-  },
-  {
-    id: 'comp-3',
-    name: 'Fast Chapa Lanches',
-    platform: 'Tchau Fome',
-    price: 8.90,
-    lastUpdated: 'Há 2 dias',
-    distanceKm: 0.8,
-    differenceToUs: -9.5,
-    threatLevel: 'high',
-  },
-  {
-    id: 'comp-4',
-    name: 'Texas Smash Gourmet',
-    platform: 'iFood',
-    price: 12.90,
-    lastUpdated: 'Há 4 horas',
-    distanceKm: 3.1,
-    differenceToUs: 31.0,
-    threatLevel: 'low',
-  },
-];
+export const INITIAL_COMPETITORS: CompetitorItem[] = [];
 
 export const USERS: UserProfile[] = [
   {
@@ -677,25 +636,26 @@ export function generateLocalAuditFallback(
   fixedCosts?: FixedExpenses
 ): PricingAuditResult {
   const cost = Number(product?.cost || 6.89);
-  const price20 = Number((cost / 0.8).toFixed(2));
-  const uaiFee = (price20 * 0.1749);
-  const realNet = (price20 - cost - uaiFee);
-  const realNetPercent = ((realNet / price20) * 100);
+  const safeCost = Math.max(0.01, Number(cost) || 0);
+  const uaiChannel = channels.find((c) => c.id === 'uai-online') || channels[0] || { totalRate: 17.49 };
+  const tfChannel = channels.find((c) => c.id === 'tf-credito') || channels[1] || { totalRate: 12.44 };
+  const ifoodChannel = channels.find((c) => c.id === 'ifood-online') || channels[2] || { totalRate: 9.5 };
+  const balcaoChannel = channels.find((c) => c.id === 'balcao-pix') || channels[channels.length - 1] || { totalRate: 1.0 };
 
-  const uaiChannel = channels.find((c) => c.id === 'uai-online') || { totalRate: 17.49 };
-  const tfChannel = channels.find((c) => c.id === 'tf-credito') || { totalRate: 12.44 };
-  const ifoodChannel = channels.find((c) => c.id === 'ifood-online') || { totalRate: 9.5 };
-  const balcaoChannel = channels.find((c) => c.id === 'balcao-pix') || { totalRate: 1.0 };
+  const price20 = Number((safeCost / 0.8).toFixed(2));
+  const uaiFee = price20 * ((Number(uaiChannel.totalRate) || 0) / 100);
+  const realNet = price20 - safeCost - uaiFee;
+  const realNetPercent = price20 > 0 ? (realNet / price20) * 100 : 0;
 
   return {
     status: realNetPercent < 5 ? 'crítico' : realNetPercent < 12 ? 'atenção' : 'saudável',
     score: realNetPercent < 5 ? 58 : 74,
     headline: 'Efeito Ilusão de Margem Detectado: Taxas de Delivery consomem o lucro planejado',
-    verdict: `Ao aplicar a fórmula tradicional da planilha [Preço = Custo / (1 - Margem)], você calculou um preço de R$ ${price20.toFixed(2)} esperando 20% de lucro. No entanto, no canal Uai Rango Pagamento Online (${uaiChannel.totalRate}% de taxa), a taxa de R$ ${uaiFee.toFixed(2)} corrói a maior parte do excedente, sobrando apenas R$ ${realNet.toFixed(2)} de lucro líquido real (${realNetPercent.toFixed(2)}%).`,
+    verdict: `Ao aplicar a fórmula tradicional da planilha [Preço = Custo / (1 - Margem)], você calculou um preço de R$ ${price20.toFixed(2)} esperando 20% de lucro. No entanto, no canal ${'name' in uaiChannel ? uaiChannel.name : 'Uai Rango Pagamento Online'} (${uaiChannel.totalRate}% de taxa), a taxa de R$ ${uaiFee.toFixed(2)} corrói a maior parte do excedente, sobrando apenas R$ ${realNet.toFixed(2)} de lucro líquido real (${realNetPercent.toFixed(2)}%).`,
     marginIllusionAnalysis: 'A planilha calcula a taxa percentual sobre o Preço de Venda final, mas a margem de custo foi calculada sem prever essa despesa variável. É mandatório adotar a Precificação Integrada Blindada.',
     bottlenecks: [
-      `Uai Rango Online (${uaiChannel.totalRate}% de taxa): Reduz margem líquida real para míseros ${realNetPercent.toFixed(2)}% no preço base de R$ ${price20.toFixed(2)}.`,
-      `Tchau Fome Crédito (${tfChannel.totalRate}% de taxa): Margem líquida fica comprimida em torno de 7,5% para margem nominal de 20%.`,
+      `Uai Rango Online (${uaiChannel.totalRate}% de taxa): Reduz margem líquida real para ${realNetPercent.toFixed(2)}% no preço base de R$ ${price20.toFixed(2)}.`,
+      `Tchau Fome Crédito (${tfChannel.totalRate}% de taxa): Margem líquida real cai para ${((((price20 - safeCost - price20 * (tfChannel.totalRate / 100)) / price20) * 100)).toFixed(2)}% sobre margem nominal de 20%.`,
       'Falta de repasse diferenciado por meio de pagamento (online vs crédito vs dinheiro/Pix).',
     ],
     channelAlerts: [
@@ -704,38 +664,38 @@ export function generateLocalAuditFallback(
         subChannel: `Pagamento Online (${uaiChannel.totalRate}%)`,
         currentNetMargin: `${realNetPercent.toFixed(2)}%`,
         warning: 'Margem crítica abaixo do piso operacional aceitável.',
-        suggestedAction: `Ajustar preço no canal para no mínimo R$ ${(cost / (1 - 0.25 - (uaiChannel.totalRate / 100))).toFixed(2)} para garantir 25% líquido real.`,
+        suggestedAction: `Ajustar preço no canal para no mínimo R$ ${(safeCost / Math.max(0.05, 1 - 0.25 - (uaiChannel.totalRate / 100))).toFixed(2)} para garantir 25% líquido real.`,
       },
       {
         channelName: 'Tchau Fome',
         subChannel: `Crédito (${tfChannel.totalRate}%)`,
-        currentNetMargin: `${(( (cost / 0.8) - cost - ((cost / 0.8) * (tfChannel.totalRate / 100)) ) / (cost / 0.8) * 100).toFixed(2)}%`,
+        currentNetMargin: `${(((price20 - safeCost - (price20 * (tfChannel.totalRate / 100))) / price20) * 100).toFixed(2)}%`,
         warning: 'Taxa considerável com baixa margem de erro.',
-        suggestedAction: 'Estimular pagamentos via Pix direto que possuem taxa de 0,99% a 1%.',
+        suggestedAction: `Estimular pagamentos via canal direto (${balcaoChannel.totalRate}%).`,
       },
       {
         channelName: 'iFood Plano Básico',
         subChannel: `Pagamento Online (${ifoodChannel.totalRate}%)`,
-        currentNetMargin: `${(( (cost / 0.8) - cost - ((cost / 0.8) * (ifoodChannel.totalRate / 100)) ) / (cost / 0.8) * 100).toFixed(2)}%`,
+        currentNetMargin: `${(((price20 - safeCost - (price20 * (ifoodChannel.totalRate / 100))) / price20) * 100).toFixed(2)}%`,
         warning: 'Taxa moderada, margem sustentável para margens nominais de 25% ou mais.',
         suggestedAction: 'Excelente canal para giro e atração de novos clientes.',
       },
       {
         channelName: 'Balcão / Retirada',
         subChannel: `Pix / Dinheiro (${balcaoChannel.totalRate}%)`,
-        currentNetMargin: `${(( (cost / 0.8) - cost - ((cost / 0.8) * (balcaoChannel.totalRate / 100)) ) / (cost / 0.8) * 100).toFixed(2)}%`,
+        currentNetMargin: `${(((price20 - safeCost - (price20 * (balcaoChannel.totalRate / 100))) / price20) * 100).toFixed(2)}%`,
         warning: 'Canal mais rentável de toda a operação gastronômica.',
         suggestedAction: 'Fidelizar clientes com descontos exclusivos no pedido direto via WhatsApp.',
       },
     ],
     smartFormulaRecommendation: {
       explanation: 'Para garantir Margem Líquida Real (MLR) desejada após taxas de app: Preço = CMV / (1 - MLR - TaxaTotalCanal).',
-      recommendedMultiplier: `Para 25% líquido no Uai Rango Online (${uaiChannel.totalRate}%): Multiplicador ideal = ${(1 / (1 - 0.25 - (uaiChannel.totalRate / 100))).toFixed(3)}x o custo CMV.`,
+      recommendedMultiplier: `Para 25% líquido no canal principal (${uaiChannel.totalRate}%): Multiplicador ideal = ${(1 / Math.max(0.05, 1 - 0.25 - (uaiChannel.totalRate / 100))).toFixed(3)}x o custo CMV.`,
     },
     actionSteps: [
-      'Adote preços dinâmicos por canal: o preço no delivery online deve ser de 15% a 20% superior ao preço de balcão.',
+      'Adote preços dinâmicos por canal: o preço no delivery online deve compensar a taxa da plataforma.',
       'Crie combos exclusivos de delivery com itens de alto markup para diluir taxas de plataforma.',
-      'Monitore mensalmente as taxas bancárias e desative a antecipação automática de 1,99% se o fluxo de caixa permitir.',
+      'Monitore mensalmente as taxas bancárias e desative antecipações desnecessárias se o fluxo de caixa permitir.',
     ],
   };
 }
