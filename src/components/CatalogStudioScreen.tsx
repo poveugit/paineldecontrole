@@ -274,9 +274,9 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     }));
 
     if (isKiloUnit(draftProduct.unit) && !fractionPriceTouched) {
-      const typedGrams = parseFloat(fractionGramsInput);
+      const typedGrams = parseFloat(fractionGramsInput.replace(',', '.'));
       if (!Number.isNaN(typedGrams) && typedGrams > 0) {
-        const fracCost = (getEffectiveKgCost(draftProduct) * typedGrams) / 1000;
+        const fracCost = Number(((getEffectiveKgCost(draftProduct) * typedGrams) / 1000).toFixed(2));
         const fracCalc = computeChannelSellingPrice(
           fracCost,
           draftProduct.targetNetMargin,
@@ -284,7 +284,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
           cleanProfit
         );
         if (fracCalc.feasible && fracCalc.sellingPrice > 0) {
-          setFractionPriceInput(fracCalc.sellingPrice.toFixed(2));
+          setFractionPriceInput(fracCalc.sellingPrice.toFixed(2).replace('.', ','));
         }
       }
     }
@@ -347,7 +347,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     const kgCost = getEffectiveKgCost(prod);
     const hasProfitBRL = typeof prod.targetNetProfitBRL === 'number' && prod.targetNetProfitBRL > 0;
     if (kgCost > 0 || hasProfitBRL) {
-      const fracCost = (kgCost * grams) / 1000;
+      const fracCost = Number(((kgCost * grams) / 1000).toFixed(2));
       const feeRate = feeRateOverride ?? getReferenceFeeRate(referenceChannelId);
       const calc = computeChannelSellingPrice(
         fracCost,
@@ -367,6 +367,37 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
   const [fractionPriceTouched, setFractionPriceTouched] = useState<boolean>(false);
   const [useFractionAsPrimary, setUseFractionAsPrimary] = useState<boolean>(true);
   const [fractionError, setFractionError] = useState<string>('');
+  const [fractionSavedFeedback, setFractionSavedFeedback] = useState<string>('');
+
+  const parsedFractionGrams = parseFloat(fractionGramsInput.replace(',', '.')) || 0;
+  const parsedFractionPrice = parseFloat(fractionPriceInput.replace(',', '.')) || 0;
+
+  const fractionChannelPreviews = useMemo(() => {
+    if (parsedFractionGrams <= 0) return [];
+    const kgCost = getEffectiveKgCost(draftProduct);
+    const fracCost = Number(((kgCost * parsedFractionGrams) / 1000).toFixed(2));
+    return channels.map((channel) => {
+      const calc = computeChannelSellingPrice(
+        fracCost,
+        draftProduct.targetNetMargin,
+        channel.totalRate,
+        draftProduct.targetNetProfitBRL
+      );
+      return {
+        channel,
+        fracCost,
+        ...calc,
+      };
+    });
+  }, [
+    channels,
+    parsedFractionGrams,
+    draftProduct.cost,
+    draftProduct.kgBaseCost,
+    draftProduct.unit,
+    draftProduct.targetNetMargin,
+    draftProduct.targetNetProfitBRL,
+  ]);
 
   const applyPrimaryFractionState = (
     prod: ProductItem,
@@ -382,28 +413,55 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
       primaryFractionGrams: grams,
       cost: fracCost,
       currentPrice: Number(sellingPrice.toFixed(2)),
+      referenceChannelId,
       kiloFractions: fractionsList ?? prod.kiloFractions,
     };
   };
 
+  const persistFractionDraftIfNamed = (updatedProd: ProductItem) => {
+    if (updatedProd.name.trim()) {
+      onUpdateProduct(updatedProd);
+      if (selectedProduct.id === updatedProd.id) {
+        onSelectProduct(updatedProd);
+      }
+    }
+  };
+
   const handleSetPrimaryFraction = (frac: KiloFractionOption) => {
     setUseFractionAsPrimary(true);
-    setDraftProduct((prev) => applyPrimaryFractionState(prev, frac.grams, frac.sellingPrice));
+    setFractionGramsInput(String(frac.grams));
+    setFractionPriceInput(frac.sellingPrice > 0 ? frac.sellingPrice.toFixed(2).replace('.', ',') : '');
+    setFractionPriceTouched(true);
+    setFractionError('');
+    const nextProd = applyPrimaryFractionState(draftProduct, frac.grams, frac.sellingPrice);
+    setDraftProduct(nextProd);
+    persistFractionDraftIfNamed(nextProd);
+    setFractionSavedFeedback(
+      `Preço salvo: ${formatGramsLabel(frac.grams)} por ${formatBRL(frac.sellingPrice)} (Custo prop. ${formatBRL(nextProd.cost)}).`
+    );
   };
 
   const handleClearPrimaryFraction = () => {
     setUseFractionAsPrimary(false);
+    setFractionSavedFeedback('');
+    setFractionPriceInput('');
+    setFractionPriceTouched(false);
     setDraftProduct((prev) => {
       const kgCost = getEffectiveKgCost(prev);
       const refFee = getReferenceFeeRate(referenceChannelId);
-      const calc = computeChannelSellingPrice(kgCost, prev.targetNetMargin, refFee);
+      const calc = computeChannelSellingPrice(
+        kgCost,
+        prev.targetNetMargin,
+        refFee,
+        prev.targetNetProfitBRL
+      );
       return {
         ...prev,
         kgBaseCost: kgCost,
         primaryFractionGrams: undefined,
         cost: kgCost,
         currentPrice:
-          kgCost > 0 && calc.feasible
+          (kgCost > 0 || (prev.targetNetProfitBRL && prev.targetNetProfitBRL > 0)) && calc.feasible
             ? calc.sellingPrice
             : prev.primaryFractionGrams && prev.currentPrice > 0
             ? Number(((prev.currentPrice * 1000) / prev.primaryFractionGrams).toFixed(2))
@@ -416,20 +474,23 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     setFractionGramsInput(String(grams));
     setFractionPriceTouched(false);
     setFractionError('');
+    setFractionSavedFeedback('');
     const suggested = getSuggestedFractionPrice(grams);
     if (suggested > 0) {
-      setFractionPriceInput(suggested.toFixed(2));
+      setFractionPriceInput(suggested.toFixed(2).replace('.', ','));
+    } else {
+      setFractionPriceInput('');
     }
   };
 
-  const handleAddKiloFraction = () => {
+  const handleSaveFractionPrice = (forcePrimary = true) => {
     const grams = parseFloat(fractionGramsInput.replace(',', '.'));
     const rawPrice = parseFloat(fractionPriceInput.replace(',', '.'));
     const suggestedFallback = !Number.isNaN(grams) && grams > 0 ? getSuggestedFractionPrice(grams) : 0;
     const price = !Number.isNaN(rawPrice) && rawPrice > 0 ? rawPrice : suggestedFallback;
 
     if (Number.isNaN(grams) || grams <= 0) {
-      setFractionError('Informe uma quantidade fracionada em gramas maior que zero (ex: 70, 100, 250).');
+      setFractionError('Informe uma quantidade fracionada em gramas maior que zero (ex: 70, 150, 250).');
       return;
     }
     if (Number.isNaN(price) || price <= 0) {
@@ -461,25 +522,45 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     }
 
     nextFractions.sort((a, b) => a.grams - b.grams);
-    setDraftProduct((prev) => {
-      const shouldMakePrimary = useFractionAsPrimary || !prev.primaryFractionGrams;
-      if (shouldMakePrimary) {
-        return applyPrimaryFractionState(prev, grams, roundedPrice, nextFractions);
-      }
-      return {
-        ...prev,
-        kgBaseCost: getEffectiveKgCost(prev),
-        kiloFractions: nextFractions,
-      };
-    });
-    setFractionPriceInput('');
-    setFractionPriceTouched(false);
+    const shouldMakePrimary = forcePrimary || useFractionAsPrimary || !draftProduct.primaryFractionGrams;
+    const nextProd = shouldMakePrimary
+      ? applyPrimaryFractionState(draftProduct, grams, roundedPrice, nextFractions)
+      : {
+          ...draftProduct,
+          kgBaseCost: getEffectiveKgCost(draftProduct),
+          kiloFractions: nextFractions,
+        };
+
+    if (forcePrimary) {
+      setUseFractionAsPrimary(true);
+    }
+    setDraftProduct(nextProd);
+    persistFractionDraftIfNamed(nextProd);
+    setFractionPriceInput(roundedPrice.toFixed(2).replace('.', ','));
+    setFractionPriceTouched(true);
+    setFractionSavedFeedback(
+      shouldMakePrimary
+        ? `Preço salvo: ${label} por ${formatBRL(roundedPrice)} definido como preço principal do produto.`
+        : `Fração ${label} (${formatBRL(roundedPrice)}) adicionada à tabela.`
+    );
   };
 
   const handleUpdateKiloFraction = (
     fractionId: string,
     updates: Partial<Pick<KiloFractionOption, 'grams' | 'sellingPrice'>>
   ) => {
+    setFractionSavedFeedback('');
+    const targetFrac = (draftProduct.kiloFractions || []).find((f) => f.id === fractionId);
+    if (
+      targetFrac &&
+      updates.sellingPrice !== undefined &&
+      Math.abs((updates.grams ?? targetFrac.grams) - parsedFractionGrams) < 0.01
+    ) {
+      setFractionPriceInput(
+        updates.sellingPrice > 0 ? updates.sellingPrice.toFixed(2).replace('.', ',') : ''
+      );
+      setFractionPriceTouched(true);
+    }
     setDraftProduct((prev) => {
       const targetBefore = (prev.kiloFractions || []).find((f) => f.id === fractionId);
       const isEditingPrimary =
@@ -516,6 +597,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
   };
 
   const handleRemoveKiloFraction = (fractionId: string) => {
+    setFractionSavedFeedback('');
     setDraftProduct((prev) => {
       const removed = (prev.kiloFractions || []).find((f) => f.id === fractionId);
       const nextFractions = (prev.kiloFractions || []).filter((f) => f.id !== fractionId);
@@ -535,13 +617,21 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
         }
         const kgCost = getEffectiveKgCost(prev);
         const refFee = getReferenceFeeRate(referenceChannelId);
-        const calc = computeChannelSellingPrice(kgCost, prev.targetNetMargin, refFee);
+        const calc = computeChannelSellingPrice(
+          kgCost,
+          prev.targetNetMargin,
+          refFee,
+          prev.targetNetProfitBRL
+        );
         return {
           ...prev,
           kiloFractions: nextFractions,
           primaryFractionGrams: undefined,
           cost: kgCost,
-          currentPrice: kgCost > 0 && calc.feasible ? calc.sellingPrice : prev.currentPrice,
+          currentPrice:
+            (kgCost > 0 || (prev.targetNetProfitBRL && prev.targetNetProfitBRL > 0)) && calc.feasible
+              ? calc.sellingPrice
+              : prev.currentPrice,
         };
       }
 
@@ -589,12 +679,17 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
     setFractionGramsInput(
       normalized.primaryFractionGrams ? String(normalized.primaryFractionGrams) : '250'
     );
-    setFractionPriceInput('');
+    setFractionPriceInput(
+      normalized.primaryFractionGrams && normalized.currentPrice > 0
+        ? normalized.currentPrice.toFixed(2).replace('.', ',')
+        : ''
+    );
     setFractionPriceTouched(false);
     setUseFractionAsPrimary(
       normalized.primaryFractionGrams !== undefined || !normalized.kiloFractions?.length
     );
     setFractionError('');
+    setFractionSavedFeedback('');
     setStudioMode('edit');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -2027,16 +2122,17 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                           kiloFractions: updatedFractions,
                         });
                         if (!fractionPriceTouched) {
-                          const typedGrams = parseFloat(fractionGramsInput);
+                          const typedGrams = parseFloat(fractionGramsInput.replace(',', '.'));
                           if (!Number.isNaN(typedGrams) && typedGrams > 0 && newInputCost > 0) {
+                            const fracCost = Number(((newInputCost * typedGrams) / 1000).toFixed(2));
                             const fracCalc = computeChannelSellingPrice(
-                              (newInputCost * typedGrams) / 1000,
+                              fracCost,
                               draftProduct.targetNetMargin,
                               refFee,
                               draftProduct.targetNetProfitBRL
                             );
                             if (fracCalc.feasible) {
-                              setFractionPriceInput(fracCalc.sellingPrice.toFixed(2));
+                              setFractionPriceInput(fracCalc.sellingPrice.toFixed(2).replace('.', ','));
                             }
                           }
                         }
@@ -2320,8 +2416,8 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                       <span className="text-[11px] text-slate-400 font-semibold mr-1">
                         Atalhos de fração:
                       </span>
-                      {[70, 100, 200, 250, 300, 500, 750].map((presetGrams) => {
-                        const isSelectedPreset = Number(fractionGramsInput) === presetGrams;
+                      {[70, 100, 150, 200, 250, 300, 500, 750].map((presetGrams) => {
+                        const isSelectedPreset = Math.abs(parsedFractionGrams - presetGrams) < 0.01;
                         return (
                           <button
                             key={presetGrams}
@@ -2351,9 +2447,9 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end text-xs">
-                    <div className="sm:col-span-4">
+                    <div className="sm:col-span-3">
                       <label className="text-[11px] text-slate-300 block mb-1 font-semibold">
-                        Quantidade Fracionada (gramas)
+                        Quantidade Fracionada (g)
                       </label>
                       <div className="relative">
                         <input
@@ -2365,65 +2461,67 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                             const val = e.target.value;
                             setFractionGramsInput(val);
                             setFractionError('');
-                            const parsed = parseFloat(val);
+                            setFractionSavedFeedback('');
+                            const parsed = parseFloat(val.replace(',', '.'));
                             if (!Number.isNaN(parsed) && parsed > 0) {
                               const suggested = getSuggestedFractionPrice(parsed);
                               if (suggested > 0 && !fractionPriceTouched) {
-                                setFractionPriceInput(suggested.toFixed(2));
+                                setFractionPriceInput(suggested.toFixed(2).replace('.', ','));
                               }
                             }
                           }}
-                          placeholder="Ex: 70"
-                          className="w-full pl-3 pr-10 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono font-bold focus:outline-none focus:border-cyan-400"
+                          placeholder="Ex: 150"
+                          className="w-full pl-3 pr-8 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono font-bold focus:outline-none focus:border-cyan-400"
                         />
                         <span className="absolute right-3 top-2 text-slate-400 font-mono text-xs">g</span>
                       </div>
-                      {Number(fractionGramsInput) > 0 && (
+                      {parsedFractionGrams > 0 && (
                         <div className="text-[10px] text-slate-400 mt-1 font-mono">
-                          = {(Number(fractionGramsInput) / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 3 })} kg · Custo prop.:{' '}
+                          = {(parsedFractionGrams / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 3 })} kg · Custo:{' '}
                           <span className="text-amber-300 font-bold">
-                            {formatBRL((getEffectiveKgCost(draftProduct) * Number(fractionGramsInput)) / 1000)}
+                            {formatBRL(Number(((getEffectiveKgCost(draftProduct) * parsedFractionGrams) / 1000).toFixed(2)))}
                           </span>
                         </div>
                       )}
                     </div>
 
                     <div className="sm:col-span-5">
-                      <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center justify-between mb-1 gap-2">
                         <label className="text-[11px] text-slate-300 font-semibold">
                           Valor a ser Vendido para essa Fração (R$)
                         </label>
-                        {Number(fractionGramsInput) > 0 && getSuggestedFractionPrice(Number(fractionGramsInput)) > 0 && (
+                        {parsedFractionGrams > 0 && getSuggestedFractionPrice(parsedFractionGrams) > 0 && (
                           <button
                             type="button"
                             onClick={() => {
                               setFractionPriceInput(
-                                getSuggestedFractionPrice(Number(fractionGramsInput)).toFixed(2)
+                                getSuggestedFractionPrice(parsedFractionGrams).toFixed(2).replace('.', ',')
                               );
                               setFractionPriceTouched(false);
                             }}
-                            className="text-[10px] text-cyan-400 hover:underline font-mono cursor-pointer"
+                            className="text-[10px] text-cyan-400 hover:underline font-mono cursor-pointer shrink-0"
                           >
-                            Sugestão 0%: {formatBRL(getSuggestedFractionPrice(Number(fractionGramsInput)))}
+                            Sugestão canal: {formatBRL(getSuggestedFractionPrice(parsedFractionGrams))}
                           </button>
                         )}
                       </div>
                       <div className="relative">
                         <span className="absolute left-3 top-2 text-slate-400 font-mono text-xs">R$</span>
                         <input
-                          type="number"
-                          min="0"
-                          step="0.01"
+                          type="text"
+                          inputMode="decimal"
                           value={fractionPriceInput}
                           onChange={(e) => {
-                            setFractionPriceInput(e.target.value);
+                            const cleaned = e.target.value.replace(/[^0-9.,]/g, '');
+                            setFractionPriceInput(cleaned);
                             setFractionPriceTouched(true);
                             setFractionError('');
+                            setFractionSavedFeedback('');
                           }}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') {
                               e.preventDefault();
-                              handleAddKiloFraction();
+                              handleSaveFractionPrice(true);
                             }
                           }}
                           placeholder="0,00"
@@ -2432,48 +2530,134 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                       </div>
                     </div>
 
-                    <div className="sm:col-span-3">
+                    <div className="sm:col-span-4 flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={handleAddKiloFraction}
-                        className="w-full py-2 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold shadow-md shadow-cyan-500/20 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                        onClick={() => handleSaveFractionPrice(true)}
+                        className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md shadow-emerald-500/20 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                        title="Salvar este preço para a fração e defini-lo como preço de venda do produto"
                       >
-                        <Plus className="w-4 h-4" />
-                        Adicionar Fração
+                        <Check className="w-4 h-4" />
+                        Salvar Preço
                       </button>
+                      {!useFractionAsPrimary && (
+                        <button
+                          type="button"
+                          onClick={() => handleSaveFractionPrice(false)}
+                          className="py-2 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition-all flex items-center justify-center gap-1 cursor-pointer shrink-0"
+                          title="Apenas adicionar à tabela sem alterar o preço principal"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          Só Listar
+                        </button>
+                      )}
                     </div>
                   </div>
 
-                  {/* Quick Channel Suggestions for the currently typed fraction */}
-                  {Number(fractionGramsInput) > 0 && getEffectiveKgCost(draftProduct) > 0 && (
-                    <div className="pt-2 border-t border-slate-800/70 flex flex-wrap items-center gap-1.5">
-                      <span className="text-[10px] text-slate-400 font-semibold mr-1">
-                        Sugestão p/ {Number(fractionGramsInput)}g nas taxas:
-                      </span>
-                      {channels.slice(0, 4).map((ch) => {
-                        const chPrice = getSuggestedFractionPrice(
-                          Number(fractionGramsInput),
-                          draftProduct,
-                          ch.totalRate
-                        );
-                        if (chPrice <= 0) return null;
-                        return (
-                          <button
-                            key={ch.id}
-                            type="button"
-                            onClick={() => {
-                              setFractionPriceInput(chPrice.toFixed(2));
-                              setFractionPriceTouched(true);
-                              setReferenceChannelId(ch.id);
-                              setDraftProduct((prev) => ({ ...prev, referenceChannelId: ch.id }));
-                            }}
-                            className="px-2 py-0.5 rounded-md bg-slate-900 hover:bg-emerald-500/15 border border-slate-700 hover:border-emerald-500/40 text-[10px] text-slate-300 hover:text-emerald-300 font-mono transition-colors cursor-pointer"
-                            title={`Aplicar valor calculado para ${ch.name} (${ch.totalRate}%)`}
-                          >
-                            {ch.name}: <strong className="text-emerald-400">{formatBRL(chPrice)}</strong>
-                          </button>
-                        );
-                      })}
+                  {fractionSavedFeedback && (
+                    <div className="px-3 py-2 rounded-xl bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 text-[11px] font-semibold flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>{fractionSavedFeedback}</span>
+                    </div>
+                  )}
+
+                  {/* ALL Channel Fee Suggestions for the currently typed fraction */}
+                  {parsedFractionGrams > 0 && (
+                    <div className="pt-3 border-t border-slate-800/80 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-[11px] text-cyan-300 font-bold flex items-center gap-1.5">
+                          <Calculator className="w-3.5 h-3.5" />
+                          Sugestões para {formatGramsLabel(parsedFractionGrams)} em Todas as Taxas ({channels.length} canais)
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          Clique em qualquer taxa para aplicar o valor e depois clique em <strong className="text-emerald-300">Salvar Preço</strong>
+                        </span>
+                      </div>
+
+                      {getEffectiveKgCost(draftProduct) <= 0 &&
+                      !(draftProduct.targetNetProfitBRL && draftProduct.targetNetProfitBRL > 0) ? (
+                        <div className="p-3 rounded-xl bg-slate-900/70 border border-dashed border-slate-800 text-[11px] text-slate-400">
+                          Informe o <strong className="text-amber-300">Preço de Custo de 1 kg (R$/kg)</strong> acima para calcular o valor sugerido de {formatGramsLabel(parsedFractionGrams)} em todas as taxas disponíveis.
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
+                          {fractionChannelPreviews.map(({ channel, feasible, sellingPrice, netProfit }) => {
+                            const isSelectedChannel =
+                              feasible &&
+                              (referenceChannelId === channel.id ||
+                                (parsedFractionPrice > 0 && Math.abs(parsedFractionPrice - sellingPrice) < 0.01));
+
+                            return (
+                              <button
+                                key={channel.id}
+                                type="button"
+                                disabled={!feasible}
+                                onClick={() => {
+                                  if (!feasible) return;
+                                  const formattedPrice = sellingPrice.toFixed(2).replace('.', ',');
+                                  setFractionPriceInput(formattedPrice);
+                                  setFractionPriceTouched(true);
+                                  setReferenceChannelId(channel.id);
+                                  setFractionError('');
+                                  setFractionSavedFeedback('');
+                                  setDraftProduct((prev) => ({
+                                    ...prev,
+                                    referenceChannelId: channel.id,
+                                  }));
+                                }}
+                                className={`text-left p-2.5 rounded-xl border transition-all flex flex-col justify-between gap-1 ${
+                                  !feasible
+                                    ? 'bg-slate-900/40 border-rose-500/20 opacity-65 cursor-not-allowed'
+                                    : isSelectedChannel
+                                    ? 'bg-emerald-500/15 border-emerald-500/60 shadow-sm cursor-pointer'
+                                    : 'bg-slate-900/80 hover:bg-slate-900 border-slate-800 hover:border-cyan-500/50 cursor-pointer'
+                                }`}
+                                title={
+                                  feasible
+                                    ? `Aplicar ${formatBRL(sellingPrice)} (${channel.name} · Taxa ${channel.totalRate.toFixed(2).replace('.', ',')}%) na fração de ${formatGramsLabel(parsedFractionGrams)}`
+                                    : 'Margem + taxa ≥ 98%'
+                                }
+                              >
+                                <div className="flex items-start justify-between gap-1.5 w-full">
+                                  <div className="min-w-0">
+                                    <div className="text-[11px] font-bold text-white truncate">
+                                      {channel.name}
+                                    </div>
+                                    <div className="text-[10px] text-slate-400">
+                                      Taxa:{' '}
+                                      <span className="font-mono text-slate-300">
+                                        {channel.totalRate.toFixed(2).replace('.', ',')}%
+                                      </span>
+                                    </div>
+                                  </div>
+                                  {isSelectedChannel && (
+                                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/25 text-emerald-300 text-[9px] font-bold shrink-0">
+                                      Aplicado
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="flex items-baseline justify-between gap-2 pt-1 border-t border-slate-800/70 w-full font-mono">
+                                  {feasible ? (
+                                    <>
+                                      <span className="text-xs font-black text-emerald-400">
+                                        {formatBRL(sellingPrice)}
+                                      </span>
+                                      <span className="text-[10px] text-cyan-300">
+                                        Lucro {formatBRL(netProfit)}
+                                      </span>
+                                    </>
+                                  ) : (
+                                    <span className="text-[10px] text-rose-400 font-sans font-semibold">
+                                      Margem + Taxa ≥ 98%
+                                    </span>
+                                  )}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -2494,14 +2678,14 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                           <th className="py-2.5 px-3">Valor de Venda (R$)</th>
                           <th className="py-2.5 px-3">Equivalente R$/kg</th>
                           <th className="py-2.5 px-3">Margem Bruta</th>
-                          <th className="py-2.5 px-3">Principal no Catálogo</th>
-                          <th className="py-2.5 px-3 text-right">Ação</th>
+                          <th className="py-2.5 px-3">Definir / Salvar Preço</th>
+                          <th className="py-2.5 px-3 text-right">Ações</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800/70">
                         {draftProduct.kiloFractions.map((frac) => {
                           const kgRatio = (frac.grams || 0) / 1000;
-                          const propCost = getEffectiveKgCost(draftProduct) * kgRatio;
+                          const propCost = Number((getEffectiveKgCost(draftProduct) * kgRatio).toFixed(2));
                           const equivPerKg = kgRatio > 0 ? frac.sellingPrice / kgRatio : 0;
                           const grossMarginPct =
                             frac.sellingPrice > 0
@@ -2582,24 +2766,44 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                                   onClick={() => handleSetPrimaryFraction(frac)}
                                   className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all flex items-center gap-1 cursor-pointer ${
                                     isPrimaryFrac
-                                      ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
-                                      : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700'
+                                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-sm'
+                                      : 'bg-emerald-500/15 hover:bg-emerald-600 text-emerald-300 hover:text-white border-emerald-500/40'
                                   }`}
-                                  title="Usar esta fração como custo e preço principal ao salvar no catálogo"
+                                  title="Definir e salvar este valor como preço principal do produto"
                                 >
-                                  {isPrimaryFrac && <Check className="w-3 h-3" />}
-                                  {isPrimaryFrac ? 'Principal ✓' : 'Usar ao Salvar'}
+                                  <Check className="w-3 h-3" />
+                                  {isPrimaryFrac ? 'Preço Salvo ✓' : 'Salvar Preço'}
                                 </button>
                               </td>
                               <td className="py-2 px-3 text-right">
-                                <button
-                                  type="button"
-                                  onClick={() => handleRemoveKiloFraction(frac.id)}
-                                  className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer"
-                                  title="Remover fração do kilo"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
+                                <div className="inline-flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setFractionGramsInput(String(frac.grams));
+                                      setFractionPriceInput(
+                                        frac.sellingPrice > 0
+                                          ? frac.sellingPrice.toFixed(2).replace('.', ',')
+                                          : ''
+                                      );
+                                      setFractionPriceTouched(true);
+                                      setFractionError('');
+                                      setFractionSavedFeedback('');
+                                    }}
+                                    className="px-2 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/30 text-[10px] font-bold transition-colors cursor-pointer"
+                                    title="Carregar esta fração para ver todas as sugestões de taxas acima"
+                                  >
+                                    Ver Taxas
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveKiloFraction(frac.id)}
+                                    className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer"
+                                    title="Remover fração do kilo"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           );
@@ -2609,7 +2813,7 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                   </div>
                 ) : (
                   <div className="p-3 rounded-xl bg-slate-950/50 border border-dashed border-slate-800 text-[11px] text-slate-400 text-center">
-                    Nenhuma fração adicionada ainda. Escolha um atalho acima (ex: 70g, 250g) ou digite o peso em gramas e o valor a ser vendido.
+                    Nenhuma fração adicionada ainda. Escolha um atalho acima (ex: 70g, 150g, 250g) ou digite o peso em gramas e o valor a ser vendido.
                   </div>
                 )}
               </div>
@@ -2694,6 +2898,13 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
                         onClick={() => {
                           if (!feasible) return;
                           setReferenceChannelId(channel.id);
+                          if (
+                            draftProduct.primaryFractionGrams &&
+                            Math.abs(draftProduct.primaryFractionGrams - parsedFractionGrams) < 0.01
+                          ) {
+                            setFractionPriceInput(sellingPrice.toFixed(2).replace('.', ','));
+                            setFractionPriceTouched(true);
+                          }
                           setDraftProduct((prev) => ({
                             ...prev,
                             referenceChannelId: channel.id,
@@ -3291,10 +3502,10 @@ export const CatalogStudioScreen: React.FC<CatalogStudioScreenProps> = ({
             };
           });
           if (isKiloUnit(selectedUnitCode)) {
-            const grams = parseFloat(fractionGramsInput) || 250;
+            const grams = parseFloat(fractionGramsInput.replace(',', '.')) || 250;
             const suggested = getSuggestedFractionPrice(grams);
             if (suggested > 0 && !fractionPriceInput) {
-              setFractionPriceInput(suggested.toFixed(2));
+              setFractionPriceInput(suggested.toFixed(2).replace('.', ','));
             }
           }
         }}
