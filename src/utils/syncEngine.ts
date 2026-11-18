@@ -48,7 +48,22 @@ export function createDefaultSyncConfig(defaultChannelId = 'direct-zero'): Exter
     referenceChannelId: defaultChannelId,
     priceRounding: '90',
     minPriceChangeAlertPercent: 1,
+    targetPaths: ['/p/categoria/4750/mercearia'],
   };
+}
+
+export function parseTargetPathsInput(raw: string): string[] {
+  return raw
+    .split(/\r?\n/)
+    .map((line) =>
+      line
+        .trim()
+        .replace(/^['"`]+/, '')
+        .replace(/['"`]+,?\s*$/, '')
+        .replace(/,+\s*$/, '')
+        .trim()
+    )
+    .filter((line) => line.length > 0 && !line.startsWith('//') && !line.startsWith('#'));
 }
 
 export function parseMonetaryValue(val: unknown): number {
@@ -589,7 +604,7 @@ export function buildBrowserExtractorScript(webhookUrl: string, apiToken: string
 // EXTRATOR 1-CLIQUE SUPERLUNA -> OMNIPRICE AI
 // 1. Abra https://www.superlunasupermercados.com.br/ no seu navegador
 // 2. Selecione sua cidade/filial e navegue na categoria ou busca desejada
-// 3. Role a página até carregar os produtos desejados
+// 3. Clique em "Carregar mais" / role a página até exibir todos os produtos
 // 4. Abra o Console (F12 -> Console), cole este código e aperte ENTER
 // ============================================================================
 (async function () {
@@ -602,6 +617,28 @@ export function buildBrowserExtractorScript(webhookUrl: string, apiToken: string
     return parseFloat(m[1].replace(/\\./g, '').replace(',', '.')) || 0;
   };
 
+  const detectPageCategory = () => {
+    const slugMatch = location.pathname.match(/\\/categoria\\/\\d+\\/([^/?#]+)/i);
+    if (slugMatch && slugMatch[1]) {
+      const slug = decodeURIComponent(slugMatch[1]).toLowerCase();
+      if (slug.includes('mercearia')) return 'Mercearia';
+      if (slug.includes('bebida')) return 'Bebidas';
+      if (slug.includes('hortifruti') || slug.includes('feira')) return 'Hortifruti';
+      if (slug.includes('acougue') || slug.includes('carne')) return 'Açougue & Frios';
+      if (slug.includes('frio') || slug.includes('laticin')) return 'Laticínios & Frios';
+      if (slug.includes('limpeza')) return 'Limpeza & Higiene';
+      if (slug.includes('higiene') || slug.includes('perfumaria') || slug.includes('beleza')) return 'Limpeza & Higiene';
+      if (slug.includes('padaria') || slug.includes('confeitaria')) return 'Padaria & Confeitaria';
+      if (slug.includes('biscoito') || slug.includes('doce') || slug.includes('bomboniere')) return 'Doces & Snacks';
+      if (slug.includes('pet')) return 'Pet Shop';
+      return slug.split(/[-_]+/).filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    }
+    const h1 = document.querySelector('h1, .category-title, .breadcrumb li:last-child')?.textContent?.trim();
+    if (h1 && h1.length >= 3 && h1.length <= 45) return h1;
+    return undefined;
+  };
+
+  const pageCategory = detectPageCategory();
   const cards = Array.from(document.querySelectorAll('product-item, .product-item, [class*="product-item"]'));
   const seen = new Set();
   const products = [];
@@ -631,6 +668,7 @@ export function buildBrowserExtractorScript(webhookUrl: string, apiToken: string
       externalId: rawCode || undefined,
       sku: rawCode || undefined,
       name: rawName,
+      category: pageCategory,
       price,
       promoPrice: promoPrice > 0 ? promoPrice : undefined,
       url
@@ -674,8 +712,14 @@ export function buildBrowserExtractorScript(webhookUrl: string, apiToken: string
 export function buildPlaywrightCollectorScript(
   webhookUrl: string,
   apiToken: string,
-  sourceUrl: string
+  sourceUrl: string,
+  targetPaths?: string[]
 ): string {
+  const safePaths =
+    targetPaths && targetPaths.length > 0
+      ? targetPaths
+      : ['/p/categoria/4750/mercearia'];
+
   return `// ============================================================================
 // ROBÔ COLETOR AUTOMÁTICO 24/7 — SUPERLUNA -> OMNIPRICE AI
 // Execução recomendada: Node.js 18+ + Playwright (passa pelo AWS WAF normalmente)
@@ -688,15 +732,83 @@ const TARGET_URL = ${JSON.stringify(sourceUrl || 'https://www.superlunasupermerc
 const WEBHOOK_URL = ${JSON.stringify(webhookUrl)};
 const SYNC_TOKEN = ${JSON.stringify(apiToken)};
 
-// Adicione aqui as URLs das categorias ou termos de busca que você revende
-const TARGET_PATHS = [
-  '/',
-  '/busca?termo=arroz',
-  '/busca?termo=feijao',
-  '/busca?termo=refrigerante',
-  '/busca?termo=oleo',
-  '/busca?termo=cafe',
-];
+// IMPORTANTE: cada link ou rota abaixo precisa ficar ENTRE ASPAS e separado por vírgula
+const TARGET_PATHS = ${JSON.stringify(safePaths, null, 2)};
+
+async function loadAllProductsWithLoadMore(page) {
+  const MAX_CLICKS = 60;
+  let noGrowthCount = 0;
+
+  for (let round = 0; round < MAX_CLICKS; round++) {
+    const beforeCount = await page.locator('product-item, .product-item, [class*="product-item"]').count();
+
+    // Rola até o final para revelar o botão "Carregar mais"
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(700);
+
+    // Procura botão/link visível e ativo de "Carregar mais" / "Ver mais" / "Mostrar mais"
+    const clicked = await page.evaluate(() => {
+      const candidates = Array.from(
+        document.querySelectorAll('button, a, [role="button"], .btn, [class*="load-more"], [class*="carregar"]')
+      );
+      for (const el of candidates) {
+        const txt = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+        if (!/(carregar\\s*mais|ver\\s*mais|mostrar\\s*mais)/.test(txt)) continue;
+        if (txt.length > 45) continue;
+
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        const isVisible =
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          style.opacity !== '0';
+        const isDisabled =
+          Boolean(el.disabled) ||
+          el.getAttribute('aria-disabled') === 'true' ||
+          el.classList.contains('disabled');
+
+        if (!isVisible || isDisabled) continue;
+
+        el.scrollIntoView({ behavior: 'instant', block: 'center' });
+        el.click();
+        return txt;
+      }
+      return null;
+    });
+
+    if (!clicked) {
+      // Tenta mais uma rolagem caso os cards carreguem só com scroll infinito
+      await page.mouse.wheel(0, 1400);
+      await page.waitForTimeout(1000);
+      const afterScroll = await page.locator('product-item, .product-item, [class*="product-item"]').count();
+      if (afterScroll <= beforeCount) {
+        break;
+      }
+      continue;
+    }
+
+    // Aguarda novos produtos aparecerem após clicar em "Carregar mais"
+    let afterClickCount = beforeCount;
+    for (let waitStep = 0; waitStep < 16; waitStep++) {
+      await page.waitForTimeout(450);
+      afterClickCount = await page.locator('product-item, .product-item, [class*="product-item"]').count();
+      if (afterClickCount > beforeCount) {
+        break;
+      }
+    }
+
+    console.log(\`[Coletor] Clicou em "\${clicked}" (\${beforeCount} -> \${afterClickCount} produtos)\`);
+
+    if (afterClickCount <= beforeCount) {
+      noGrowthCount++;
+      if (noGrowthCount >= 2) break;
+    } else {
+      noGrowthCount = 0;
+    }
+  }
+}
 
 async function extractProductsFromPage(page) {
   return page.evaluate(() => {
@@ -706,6 +818,28 @@ async function extractProductsFromPage(page) {
       return parseFloat(m[1].replace(/\\./g, '').replace(',', '.')) || 0;
     };
 
+    const detectPageCategory = () => {
+      const slugMatch = location.pathname.match(/\\/categoria\\/\\d+\\/([^/?#]+)/i);
+      if (slugMatch && slugMatch[1]) {
+        const slug = decodeURIComponent(slugMatch[1]).toLowerCase();
+        if (slug.includes('mercearia')) return 'Mercearia';
+        if (slug.includes('bebida')) return 'Bebidas';
+        if (slug.includes('hortifruti') || slug.includes('feira')) return 'Hortifruti';
+        if (slug.includes('acougue') || slug.includes('carne')) return 'Açougue & Frios';
+        if (slug.includes('frio') || slug.includes('laticin')) return 'Laticínios & Frios';
+        if (slug.includes('limpeza')) return 'Limpeza & Higiene';
+        if (slug.includes('higiene') || slug.includes('perfumaria') || slug.includes('beleza')) return 'Limpeza & Higiene';
+        if (slug.includes('padaria') || slug.includes('confeitaria')) return 'Padaria & Confeitaria';
+        if (slug.includes('biscoito') || slug.includes('doce') || slug.includes('bomboniere')) return 'Doces & Snacks';
+        if (slug.includes('pet')) return 'Pet Shop';
+        return slug.split(/[-_]+/).filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      }
+      const h1 = document.querySelector('h1, .category-title, .breadcrumb li:last-child')?.textContent?.trim();
+      if (h1 && h1.length >= 3 && h1.length <= 45) return h1;
+      return undefined;
+    };
+
+    const pageCategory = detectPageCategory();
     const cards = Array.from(document.querySelectorAll('product-item, .product-item, [class*="product-item"]'));
     const list = [];
     for (const card of cards) {
@@ -730,6 +864,7 @@ async function extractProductsFromPage(page) {
         externalId: code || undefined,
         sku: code || undefined,
         name,
+        category: pageCategory,
         price,
         promoPrice: promoPrice > 0 ? promoPrice : undefined,
         url,
@@ -747,23 +882,22 @@ async function run() {
   const catalogMap = new Map();
 
   for (const path of TARGET_PATHS) {
-    const fullUrl = new URL(path, TARGET_URL).href;
+    const cleanPath = String(path || '').trim();
+    if (!cleanPath) continue;
+    const fullUrl = new URL(cleanPath, TARGET_URL).href;
     console.log('[Coletor] Abrindo:', fullUrl);
     await page.goto(fullUrl, { waitUntil: 'networkidle', timeout: 45000 });
     await page.waitForTimeout(2500);
 
-    // Rola a página para carregar vitrines lazy-load
-    for (let s = 0; s < 3; s++) {
-      await page.mouse.wheel(0, 1400);
-      await page.waitForTimeout(800);
-    }
+    // Expande todos os produtos clicando automaticamente em "Carregar mais"
+    await loadAllProductsWithLoadMore(page);
 
     const items = await extractProductsFromPage(page);
     for (const item of items) {
       const key = item.externalId || item.name.toLowerCase();
       catalogMap.set(key, item);
     }
-    console.log(\`[Coletor] Coletados \${items.length} itens em \${path}\`);
+    console.log(\`[Coletor] Coletados \${items.length} itens em \${cleanPath}\`);
   }
 
   await browser.close();
@@ -773,6 +907,8 @@ async function run() {
     console.log('[Coletor] Nenhum produto encontrado.');
     return;
   }
+
+  console.log(\`[Coletor] Total único extraído: \${products.length} produtos. Enviando para o OmniPrice AI...\`);
 
   // Envia em lotes de 150 itens para o OmniPrice AI
   for (let i = 0; i < products.length; i += 150) {
@@ -790,7 +926,7 @@ async function run() {
       }),
     });
     const result = await res.json();
-    console.log('[Coletor] Lote sincronizado:', result);
+    console.log(\`[Coletor] Lote \${Math.floor(i / 150) + 1} sincronizado:\`, result);
   }
 }
 

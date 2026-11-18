@@ -102,6 +102,7 @@ export interface ExternalSyncConfig {
   referenceChannelId: string;
   priceRounding: 'none' | '90' | '99';
   minPriceChangeAlertPercent: number;
+  targetPaths?: string[];
   updatedAt?: string;
 }
 

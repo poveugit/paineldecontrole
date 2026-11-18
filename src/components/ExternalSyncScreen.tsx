@@ -39,6 +39,7 @@ import {
   computeResaleSellingPrice,
   generateSyncToken,
   parseExternalCatalogPayload,
+  parseTargetPathsInput,
   reconcileExternalCatalog,
 } from '../utils/syncEngine';
 import { CurrencyCentsInput } from './CurrencyCentsInput';
@@ -114,11 +115,20 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
   const [newHistoryCategoryName, setNewHistoryCategoryName] = useState('');
   const [isUpdatingCategories, setIsUpdatingCategories] = useState(false);
   const [categoryUpdateMsg, setCategoryUpdateMsg] = useState<string | null>(null);
+  const [targetPathsText, setTargetPathsText] = useState<string>(
+    (syncConfig.targetPaths && syncConfig.targetPaths.length > 0
+      ? syncConfig.targetPaths
+      : ['/p/categoria/4750/mercearia']
+    ).join('\n')
+  );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Sync draft when remote config loads for the first time
   React.useEffect(() => {
     setDraftConfig(syncConfig);
+    if (syncConfig.targetPaths && syncConfig.targetPaths.length > 0) {
+      setTargetPathsText(syncConfig.targetPaths.join('\n'));
+    }
   }, [syncConfig]);
 
   const webhookUrl = useMemo(() => {
@@ -143,9 +153,20 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
     [webhookUrl, draftConfig.apiToken]
   );
 
+  const parsedTargetPaths = useMemo(
+    () => parseTargetPathsInput(targetPathsText),
+    [targetPathsText]
+  );
+
   const playwrightScript = useMemo(
-    () => buildPlaywrightCollectorScript(webhookUrl, draftConfig.apiToken, draftConfig.sourceUrl),
-    [webhookUrl, draftConfig.apiToken, draftConfig.sourceUrl]
+    () =>
+      buildPlaywrightCollectorScript(
+        webhookUrl,
+        draftConfig.apiToken,
+        draftConfig.sourceUrl,
+        parsedTargetPaths
+      ),
+    [webhookUrl, draftConfig.apiToken, draftConfig.sourceUrl, parsedTargetPaths]
   );
 
   const copyText = async (key: string, text: string) => {
@@ -1160,16 +1181,45 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
                 <div className="rounded-xl bg-slate-950 border border-slate-800 p-4 text-xs text-slate-300 space-y-2">
                   <p className="font-semibold text-white">Coletor Automático Agendado (Node.js + Playwright)</p>
                   <p className="text-slate-400">
-                    Como a SuperLuna utiliza proteção AWS WAF, um navegador real (Chromium via Playwright) resolve o desafio de segurança automaticamente, coleta os preços atualizados das categorias configuradas e envia via API para atualizar seus custos no Firestore em tempo real.
+                    O robô abre as categorias abaixo em um navegador real (Chromium), clica automaticamente no botão <span className="text-emerald-300 font-semibold">"Carregar mais"</span> até exibir todos os produtos, detecta a categoria pelo link e envia para o seu catálogo via API.
                   </p>
                   <div className="pt-1 font-mono text-[11px] text-emerald-300 bg-slate-900 px-3 py-2 rounded-lg border border-slate-800 overflow-x-auto">
-                    npm install playwright && npx playwright install chromium && node coletor-superluna.mjs
+                    npm init -y && npm install playwright && npx playwright install chromium && node coletor-superluna.mjs
                   </div>
+                </div>
+
+                {/* Safe Visual Editor for TARGET_PATHS */}
+                <div className="rounded-xl bg-slate-950 border border-slate-800 p-4 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label className="text-xs font-semibold text-white">
+                      Links ou Rotas da SuperLuna para o Robô Vigiar (1 por linha)
+                    </label>
+                    <span className="text-[11px] text-emerald-300 font-mono tabular-nums">
+                      {parsedTargetPaths.length} {parsedTargetPaths.length === 1 ? 'rota configurada' : 'rotas configuradas'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Cole aqui os endereços completos (ex.: <code className="text-cyan-300">https://www.superlunasupermercados.com.br/p/categoria/4750/mercearia</code>) ou apenas o final (<code className="text-cyan-300">/p/categoria/4750/mercearia</code>), sem precisar digitar aspas ou vírgulas.
+                  </p>
+                  <textarea
+                    rows={4}
+                    value={targetPathsText}
+                    onChange={(e) => {
+                      const nextText = e.target.value;
+                      setTargetPathsText(nextText);
+                      setDraftConfig((prev) => ({
+                        ...prev,
+                        targetPaths: parseTargetPathsInput(nextText),
+                      }));
+                    }}
+                    placeholder={`https://www.superlunasupermercados.com.br/p/categoria/4750/mercearia\n/p/categoria/4751/bebidas`}
+                    className="w-full p-3 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono text-cyan-200 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
+                  />
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs font-medium text-slate-400">
-                    Arquivo <code className="text-slate-200">coletor-superluna.mjs</code>
+                    Arquivo <code className="text-slate-200">coletor-superluna.mjs</code> (já gerado com as rotas acima)
                   </span>
                   <div className="flex items-center gap-2">
                     <button
