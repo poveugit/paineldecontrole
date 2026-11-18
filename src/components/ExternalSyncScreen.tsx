@@ -1181,10 +1181,13 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
                 <div className="rounded-xl bg-slate-950 border border-slate-800 p-4 text-xs text-slate-300 space-y-2">
                   <p className="font-semibold text-white">Coletor Automático Agendado (Node.js + Playwright)</p>
                   <p className="text-slate-400">
-                    O robô abre as categorias abaixo em um navegador real (Chromium), clica automaticamente no botão <span className="text-emerald-300 font-semibold">"Carregar mais"</span> até exibir todos os produtos, detecta a categoria pelo link e envia para o seu catálogo via API.
+                    O robô abre as categorias abaixo em um navegador real (Chromium), salva sua cidade/filial do SuperLuna em sessão persistente, clica automaticamente em <span className="text-emerald-300 font-semibold">"Carregar mais"</span> até expandir todos os produtos e envia para seu catálogo via API.
                   </p>
-                  <div className="pt-1 font-mono text-[11px] text-emerald-300 bg-slate-900 px-3 py-2 rounded-lg border border-slate-800 overflow-x-auto">
-                    npm init -y && npm install playwright && npx playwright install chromium && node coletor-superluna.mjs
+                  <div className="space-y-1.5 pt-1 font-mono text-[11px] bg-slate-900 px-3 py-2.5 rounded-lg border border-slate-800 overflow-x-auto">
+                    <div className="text-slate-400"># 1ª vez (abre o navegador para escolher sua cidade/filial e liberar o WAF):</div>
+                    <div className="text-cyan-300">node coletor-superluna.mjs --configurar</div>
+                    <div className="text-slate-400 pt-1"># Demais execuções 24/7 (roda em segundo plano com a filial salva):</div>
+                    <div className="text-emerald-300">node coletor-superluna.mjs</div>
                   </div>
                 </div>
 
