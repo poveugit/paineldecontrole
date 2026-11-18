@@ -926,6 +926,50 @@ export default function App() {
     ]);
   };
 
+  const handleBulkUpdateCategories = async (
+    updates: Array<{ productId: string; category: string }>,
+    newCustomCategory?: string
+  ) => {
+    const trimmedCustom = newCustomCategory?.trim();
+    if (trimmedCustom && !customCategories.some((c) => c.toLowerCase() === trimmedCustom.toLowerCase())) {
+      handleSaveCustomCategories([...customCategories, trimmedCustom]);
+    }
+
+    if (updates.length === 0) return;
+
+    const updateMap = new Map(updates.map((u) => [u.productId, u.category]));
+    const changedProducts: ProductItem[] = [];
+
+    const nextProducts = products.map((p) => {
+      const nextCat = updateMap.get(p.id);
+      if (!nextCat || p.category === nextCat) return p;
+      const updated = normalizeProduct({ ...p, category: nextCat });
+      changedProducts.push(updated);
+      return updated;
+    });
+
+    const nextHistory = syncHistory.map((run) => ({
+      ...run,
+      changes: (run.changes || []).map((chg) => {
+        const nextCat = updateMap.get(chg.productId);
+        return nextCat ? { ...chg, category: nextCat } : chg;
+      }),
+    }));
+
+    setProducts(nextProducts);
+    if (updateMap.has(selectedProduct.id)) {
+      const updatedSelected = nextProducts.find((p) => p.id === selectedProduct.id);
+      if (updatedSelected) setSelectedProduct(updatedSelected);
+    }
+    setSyncHistory(nextHistory);
+
+    if (changedProducts.length > 0) {
+      await dbSaveProductsBatch(changedProducts);
+    }
+    await dbSaveSyncHistory(nextHistory);
+    setLastSyncTime(new Date());
+  };
+
   // Cloud Firestore Sync Actions
   const handleSyncAllToCloud = async () => {
     await dbSaveProductsBatch(products);
@@ -1329,11 +1373,23 @@ export default function App() {
               <ExternalSyncScreen
                 products={products}
                 channels={channels}
+                customCategories={customCategories}
                 syncConfig={syncConfig}
                 syncHistory={syncHistory}
                 onSaveSyncConfig={handleSaveSyncConfig}
                 onApplySyncBatch={handleApplySyncBatch}
+                onBulkUpdateCategories={handleBulkUpdateCategories}
                 onOpenCatalogStudio={() => {
+                  setActiveScreen('catalog-studio');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                onOpenProductInCatalog={(productId) => {
+                  const found = products.find((p) => p.id === productId);
+                  if (found) {
+                    setSelectedProduct(found);
+                    setProductFocusScope('single');
+                  }
+                  setCatalogInitialEditProductId(productId);
                   setActiveScreen('catalog-studio');
                   window.scrollTo({ top: 0, behavior: 'smooth' });
                 }}

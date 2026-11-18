@@ -41,10 +41,12 @@ import {
   parseExternalCatalogPayload,
   reconcileExternalCatalog,
 } from '../utils/syncEngine';
+import { CurrencyCentsInput } from './CurrencyCentsInput';
 
 interface ExternalSyncScreenProps {
   products: ProductItem[];
   channels: ChannelFee[];
+  customCategories?: string[];
   syncConfig: ExternalSyncConfig;
   syncHistory: ExternalSyncRunLog[];
   onSaveSyncConfig: (config: ExternalSyncConfig) => Promise<void>;
@@ -53,7 +55,12 @@ interface ExternalSyncScreenProps {
     productsToSave: ProductItem[],
     runLog: ExternalSyncRunLog
   ) => Promise<void>;
+  onBulkUpdateCategories?: (
+    updates: Array<{ productId: string; category: string }>,
+    newCustomCategory?: string
+  ) => Promise<void>;
   onOpenCatalogStudio: () => void;
+  onOpenProductInCatalog?: (productId: string) => void;
   onBackToDashboard: () => void;
 }
 
@@ -62,11 +69,14 @@ type CollectorTab = 'import' | 'browser' | 'playwright';
 export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
   products,
   channels,
+  customCategories = [],
   syncConfig,
   syncHistory,
   onSaveSyncConfig,
   onApplySyncBatch,
+  onBulkUpdateCategories,
   onOpenCatalogStudio,
+  onOpenProductInCatalog,
   onBackToDashboard,
 }) => {
   const [draftConfig, setDraftConfig] = useState<ExternalSyncConfig>(syncConfig);
@@ -96,6 +106,14 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
   const [syncFeedback, setSyncFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
   const [expandedRunId, setExpandedRunId] = useState<string | null>(syncHistory[0]?.id || null);
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyCategoryFilter, setHistoryCategoryFilter] = useState<string>('all');
+  const [selectedHistoryProductIds, setSelectedHistoryProductIds] = useState<string[]>([]);
+  const [bulkTargetCategory, setBulkTargetCategory] = useState<string>('Mercearia');
+  const [isCreatingHistoryCat, setIsCreatingHistoryCat] = useState(false);
+  const [newHistoryCategoryName, setNewHistoryCategoryName] = useState('');
+  const [isUpdatingCategories, setIsUpdatingCategories] = useState(false);
+  const [categoryUpdateMsg, setCategoryUpdateMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Sync draft when remote config loads for the first time
@@ -276,13 +294,168 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
     });
   }, [previewResult, previewFilter, previewSearch]);
 
+  const availableCategories = useMemo(() => {
+    const defaults = [
+      'Mercearia',
+      'Bebidas',
+      'Açougue & Frios',
+      'Laticínios & Frios',
+      'Limpeza & Higiene',
+      'Hortifruti',
+      'Doces & Snacks',
+      'Padaria & Matinais',
+      'Lanches',
+      'Acompanhamentos',
+      'Combos',
+      'Pizzas',
+      'Sobremesas',
+      'Geral',
+    ];
+    const map = new Map<string, string>();
+    [...defaults, ...customCategories, ...products.map((p) => p.category)].forEach((raw) => {
+      const cat = String(raw || '').trim();
+      if (cat && !map.has(cat.toLowerCase())) {
+        map.set(cat.toLowerCase(), cat);
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [products, customCategories]);
+
+  const handleQuickCategoryChange = async (
+    productIds: string[],
+    targetCategory: string,
+    customCreated?: string
+  ) => {
+    const cleanCat = targetCategory.trim();
+    if (!cleanCat || productIds.length === 0 || !onBulkUpdateCategories) return;
+
+    setIsUpdatingCategories(true);
+    setCategoryUpdateMsg(null);
+    try {
+      const uniqueIds = Array.from(new Set(productIds));
+      await onBulkUpdateCategories(
+        uniqueIds.map((productId) => ({ productId, category: cleanCat })),
+        customCreated
+      );
+      setSelectedHistoryProductIds((prev) => prev.filter((id) => !uniqueIds.includes(id)));
+      setCategoryUpdateMsg(
+        uniqueIds.length === 1
+          ? `Categoria alterada para "${cleanCat}".`
+          : `${uniqueIds.length} produtos movidos para "${cleanCat}".`
+      );
+      setTimeout(() => setCategoryUpdateMsg(null), 3500);
+    } finally {
+      setIsUpdatingCategories(false);
+    }
+  };
+
+  const handleCreateInlineHistoryCategory = async () => {
+    const trimmed = newHistoryCategoryName.trim();
+    if (!trimmed) return;
+    setBulkTargetCategory(trimmed);
+    setIsCreatingHistoryCat(false);
+    setNewHistoryCategoryName('');
+    if (selectedHistoryProductIds.length > 0) {
+      await handleQuickCategoryChange(selectedHistoryProductIds, trimmed, trimmed);
+    } else if (onBulkUpdateCategories) {
+      await onBulkUpdateCategories([], trimmed);
+      setCategoryUpdateMsg(`Categoria "${trimmed}" adicionada à lista.`);
+      setTimeout(() => setCategoryUpdateMsg(null), 3000);
+    }
+  };
+
+  const hasFixedProfitBRL =
+    typeof draftConfig.defaultTargetProfitBRL === 'number' && draftConfig.defaultTargetProfitBRL > 0;
+
   const sampleCostPreview = 10;
   const sampleSellingPreview = computeResaleSellingPrice(
     sampleCostPreview,
     draftConfig.defaultTargetMargin,
     refFeeRate,
-    draftConfig.priceRounding
+    draftConfig.priceRounding,
+    draftConfig.defaultTargetProfitBRL
   );
+
+  const handleApplyProfitRuleToAllProducts = async () => {
+    if (products.length === 0) return;
+    setIsSavingConfig(true);
+    setConfigFeedback(null);
+    try {
+      await onSaveSyncConfig(draftConfig);
+      const nowIso = new Date().toISOString();
+      const targetProfitBRL = hasFixedProfitBRL ? draftConfig.defaultTargetProfitBRL : undefined;
+      const changes: ExternalSyncDiffItem[] = [];
+
+      const updatedProducts = products.map((prod) => {
+        const prodCost = Math.max(0, Number(prod.cost) || 0);
+        const oldPrice = Number(prod.currentPrice) || 0;
+        const nextPrice = computeResaleSellingPrice(
+          prodCost,
+          draftConfig.defaultTargetMargin,
+          refFeeRate,
+          draftConfig.priceRounding,
+          targetProfitBRL
+        );
+
+        changes.push({
+          action:
+            Math.abs(nextPrice - oldPrice) < 0.01
+              ? 'unchanged'
+              : nextPrice > oldPrice
+              ? 'cost_increased'
+              : 'cost_decreased',
+          productId: prod.id,
+          sku: prod.sku || '',
+          name: prod.name,
+          category: prod.category,
+          oldCost: prodCost,
+          newCost: prodCost,
+          oldPrice,
+          newPrice: nextPrice,
+          diffPercent: oldPrice > 0 ? Number((((nextPrice - oldPrice) / oldPrice) * 100).toFixed(2)) : 0,
+        });
+
+        return {
+          ...prod,
+          targetNetMargin: draftConfig.defaultTargetMargin,
+          targetNetProfitBRL: targetProfitBRL,
+          referenceChannelId:
+            draftConfig.referenceChannelId === 'direct-zero' ? undefined : draftConfig.referenceChannelId,
+          currentPrice: nextPrice,
+        };
+      });
+
+      const runLog: ExternalSyncRunLog = {
+        id: `sync-rule-${Date.now()}`,
+        timestamp: nowIso,
+        source: 'resale-rule',
+        sourceLabel: hasFixedProfitBRL
+          ? `Meta Fixa ${formatBRL(targetProfitBRL || 0)}/un`
+          : `Margem Alvo ${(draftConfig.defaultTargetMargin * 100).toFixed(0)}%`,
+        trigger: 'manual_import',
+        totalReceived: products.length,
+        createdCount: 0,
+        updatedCount: products.length,
+        unchangedCount: 0,
+        priceIncreases: changes.filter((c) => c.action === 'cost_increased').length,
+        priceDecreases: changes.filter((c) => c.action === 'cost_decreased').length,
+        changes: changes.slice(0, 80),
+      };
+
+      await onApplySyncBatch(updatedProducts, updatedProducts, runLog);
+      setConfigFeedback({
+        type: 'success',
+        msg: `Meta de lucro aplicada com sucesso em todos os ${products.length} produtos do catálogo.`,
+      });
+    } catch (err) {
+      setConfigFeedback({
+        type: 'error',
+        msg: err instanceof Error ? err.message : 'Erro ao aplicar meta nos produtos.',
+      });
+    } finally {
+      setIsSavingConfig(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -383,7 +556,9 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
               {formatBRL(sampleSellingPreview)}
             </span>
             <span className="text-xs text-slate-400 font-mono tabular-nums">
-              ({(draftConfig.defaultTargetMargin * 100).toFixed(0)}% líq.)
+              {hasFixedProfitBRL
+                ? `(+${formatBRL(draftConfig.defaultTargetProfitBRL || 0)} líq.)`
+                : `(${(draftConfig.defaultTargetMargin * 100).toFixed(0)}% líq.)`}
             </span>
           </div>
         </div>
@@ -562,20 +737,56 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
               </label>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
               <div>
-                <label className="text-xs font-medium text-slate-400 block mb-1">Margem Líq. Alvo (%)</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-medium text-emerald-300">
+                    Lucro Líquido Desejado (R$/un)
+                  </label>
+                  {hasFixedProfitBRL && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDraftConfig((prev) => ({ ...prev, defaultTargetProfitBRL: 0 }))
+                      }
+                      className="text-[11px] text-slate-400 hover:text-white transition-colors"
+                    >
+                      Usar %
+                    </button>
+                  )}
+                </div>
+                <div className="relative">
+                  <span className="text-xs font-mono text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                    R$
+                  </span>
+                  <CurrencyCentsInput
+                    value={draftConfig.defaultTargetProfitBRL || 0}
+                    onChangeValue={(val) =>
+                      setDraftConfig((prev) => ({ ...prev, defaultTargetProfitBRL: val }))
+                    }
+                    placeholder="0,00 (opcional)"
+                    ariaLabel="Lucro líquido desejado por unidade em reais"
+                    className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950 border border-emerald-500/40 text-xs font-mono tabular-nums text-white placeholder:text-slate-600 focus:border-emerald-400 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-slate-400 block mb-1">
+                  Margem Líq. Alvo (%) {hasFixedProfitBRL ? '· fallback' : ''}
+                </label>
                 <input
                   type="number"
                   min={1}
                   max={80}
                   step={1}
+                  disabled={hasFixedProfitBRL}
                   value={Math.round((draftConfig.defaultTargetMargin || 0.25) * 100)}
                   onChange={(e) => {
                     const pct = Math.min(80, Math.max(1, Number(e.target.value) || 25));
                     setDraftConfig((prev) => ({ ...prev, defaultTargetMargin: pct / 100 }));
                   }}
-                  className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono tabular-nums text-white focus:border-emerald-500 focus:outline-none"
+                  className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono tabular-nums text-white focus:border-emerald-500 focus:outline-none disabled:opacity-45"
                 />
               </div>
 
@@ -614,6 +825,12 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
               </div>
             </div>
 
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              {hasFixedProfitBRL
+                ? `Meta fixa ativa: todos os produtos importados/sincronizados já recebem ${formatBRL(draftConfig.defaultTargetProfitBRL || 0)} de lucro líquido livre por unidade, blindado contra a taxa de ${refFeeRate.toFixed(2).replace('.', ',')}% do canal.`
+                : 'Se preencher Lucro Líquido Desejado (R$), esse lucro fixo por unidade será preenchido automaticamente em todos os produtos sincronizados no lugar da margem %.'}
+            </p>
+
             {configFeedback && (
               <div
                 className={`rounded-xl border px-3 py-2 text-xs ${
@@ -626,14 +843,30 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
               </div>
             )}
 
-            <button
-              onClick={handleSaveConfig}
-              disabled={isSavingConfig}
-              className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold transition-colors inline-flex items-center justify-center gap-2"
-            >
-              <Save className="w-4 h-4" />
-              <span>{isSavingConfig ? 'Salvando na Nuvem...' : 'Salvar Regras e Ativar API na Nuvem'}</span>
-            </button>
+            <div className="space-y-2">
+              <button
+                onClick={handleSaveConfig}
+                disabled={isSavingConfig}
+                className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold transition-colors inline-flex items-center justify-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                <span>{isSavingConfig ? 'Salvando na Nuvem...' : 'Salvar Regras e Ativar API na Nuvem'}</span>
+              </button>
+
+              {products.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleApplyProfitRuleToAllProducts}
+                  disabled={isSavingConfig}
+                  className="w-full py-2 px-4 rounded-xl bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-cyan-300 border border-slate-700 text-xs font-semibold transition-colors inline-flex items-center justify-center gap-2"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>
+                    Aplicar {hasFixedProfitBRL ? `+${formatBRL(draftConfig.defaultTargetProfitBRL || 0)}/un` : `${(draftConfig.defaultTargetMargin * 100).toFixed(0)}%`} nos {products.length} Produtos Atuais
+                  </span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -999,10 +1232,72 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
                       ? 'Extrator Chrome'
                       : 'Importação Manual';
 
+                  const rawChanges = run.changes || [];
+                  const resolvedChanges = rawChanges.map((chg) => {
+                    const liveProd = products.find((p) => p.id === chg.productId);
+                    return {
+                      ...chg,
+                      resolvedCategory: liveProd?.category || chg.category || 'Sem categoria',
+                      existsInCatalog: Boolean(liveProd),
+                    };
+                  });
+
+                  const categoryCounts = new Map<string, number>();
+                  resolvedChanges.forEach((c) => {
+                    categoryCounts.set(
+                      c.resolvedCategory,
+                      (categoryCounts.get(c.resolvedCategory) || 0) + 1
+                    );
+                  });
+                  const categorySummary = Array.from(categoryCounts.entries()).sort((a, b) => b[1] - a[1]);
+
+                  const qHist = normalizeSearchText(historySearch);
+                  const visibleChanges = resolvedChanges.filter((c) => {
+                    if (historyCategoryFilter !== 'all' && c.resolvedCategory !== historyCategoryFilter) {
+                      return false;
+                    }
+                    if (qHist) {
+                      const hay = normalizeSearchText(`${c.name} ${c.sku} ${c.resolvedCategory}`);
+                      if (!hay.includes(qHist)) return false;
+                    }
+                    return true;
+                  });
+
+                  const selectableVisibleIds = visibleChanges
+                    .filter((c) => c.existsInCatalog)
+                    .map((c) => c.productId);
+                  const allVisibleSelected =
+                    selectableVisibleIds.length > 0 &&
+                    selectableVisibleIds.every((id) => selectedHistoryProductIds.includes(id));
+
+                  const toggleSelectAllVisible = () => {
+                    if (allVisibleSelected) {
+                      setSelectedHistoryProductIds((prev) =>
+                        prev.filter((id) => !selectableVisibleIds.includes(id))
+                      );
+                    } else {
+                      setSelectedHistoryProductIds((prev) =>
+                        Array.from(new Set([...prev, ...selectableVisibleIds]))
+                      );
+                    }
+                  };
+
+                  const toggleSelectOne = (productId: string) => {
+                    setSelectedHistoryProductIds((prev) =>
+                      prev.includes(productId)
+                        ? prev.filter((id) => id !== productId)
+                        : [...prev, productId]
+                    );
+                  };
+
                   return (
                     <div key={run.id} className="rounded-xl bg-slate-950 border border-slate-800 overflow-hidden">
                       <button
-                        onClick={() => setExpandedRunId(isExpanded ? null : run.id)}
+                        onClick={() => {
+                          setExpandedRunId(isExpanded ? null : run.id);
+                          setHistoryCategoryFilter('all');
+                          setSelectedHistoryProductIds([]);
+                        }}
                         className="w-full px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-left hover:bg-slate-900/60 transition-colors"
                       >
                         <div className="space-y-0.5">
@@ -1011,6 +1306,12 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
                           </div>
                           <div className="text-[11px] text-slate-400 font-mono tabular-nums">
                             {new Date(run.timestamp).toLocaleString('pt-BR')} · {run.totalReceived} recebidos
+                            {categorySummary.length > 0 && (
+                              <span className="text-slate-300">
+                                {' · '}
+                                {categorySummary.map(([cat, count]) => `${cat} (${count})`).join(', ')}
+                              </span>
+                            )}
                           </div>
                         </div>
 
@@ -1021,43 +1322,263 @@ export const ExternalSyncScreen: React.FC<ExternalSyncScreenProps> = ({
                         </div>
                       </button>
 
-                      {isExpanded && run.changes && run.changes.length > 0 && (
-                        <div className="border-t border-slate-800 max-h-60 overflow-y-auto">
-                          <table className="w-full text-left text-xs">
-                            <thead className="bg-slate-900/70 text-slate-400 border-b border-slate-800">
-                              <tr>
-                                <th className="py-1.5 px-3 font-medium">Item</th>
-                                <th className="py-1.5 px-3 font-medium text-right">Custo</th>
-                                <th className="py-1.5 px-3 font-medium text-right">Venda</th>
-                                <th className="py-1.5 px-3 font-medium text-right">Variação</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-800/60">
-                              {run.changes.map((chg, idx) => (
-                                <tr key={`${run.id}-${chg.productId}-${idx}`}>
-                                  <td className="py-1.5 px-3 text-slate-200 truncate max-w-[210px]">{chg.name}</td>
-                                  <td className="py-1.5 px-3 text-right font-mono tabular-nums text-slate-300">
-                                    {chg.oldCost !== null && chg.oldCost !== chg.newCost
-                                      ? `${formatBRL(chg.oldCost)} → ${formatBRL(chg.newCost)}`
-                                      : formatBRL(chg.newCost)}
-                                  </td>
-                                  <td className="py-1.5 px-3 text-right font-mono tabular-nums text-emerald-300">
-                                    {formatBRL(chg.newPrice)}
-                                  </td>
-                                  <td className="py-1.5 px-3 text-right font-mono tabular-nums">
-                                    {chg.action === 'created' && <span className="text-emerald-400">Novo</span>}
-                                    {chg.action === 'cost_increased' && (
-                                      <span className="text-rose-400">+{chg.diffPercent.toFixed(1)}%</span>
-                                    )}
-                                    {chg.action === 'cost_decreased' && (
-                                      <span className="text-cyan-400">{chg.diffPercent.toFixed(1)}%</span>
-                                    )}
-                                    {chg.action === 'unchanged' && <span className="text-slate-500">0%</span>}
-                                  </td>
-                                </tr>
+                      {isExpanded && resolvedChanges.length > 0 && (
+                        <div className="border-t border-slate-800">
+                          {/* Category breakdown & quick filter inside expanded run */}
+                          <div className="px-3 py-2.5 bg-slate-900/50 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                              <button
+                                type="button"
+                                onClick={() => setHistoryCategoryFilter('all')}
+                                className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
+                                  historyCategoryFilter === 'all'
+                                    ? 'bg-slate-800 text-white'
+                                    : 'text-slate-400 hover:text-white'
+                                }`}
+                              >
+                                Todas ({resolvedChanges.length})
+                              </button>
+                              {categorySummary.map(([cat, count]) => (
+                                <button
+                                  key={cat}
+                                  type="button"
+                                  onClick={() =>
+                                    setHistoryCategoryFilter((prev) => (prev === cat ? 'all' : cat))
+                                  }
+                                  className={`px-2 py-0.5 rounded-md font-medium transition-colors ${
+                                    historyCategoryFilter === cat
+                                      ? 'bg-cyan-600 text-white'
+                                      : 'bg-slate-950 text-cyan-300 border border-slate-800 hover:border-slate-700'
+                                  }`}
+                                >
+                                  {cat} ({count})
+                                </button>
                               ))}
-                            </tbody>
-                          </table>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setIsCreatingHistoryCat((prev) => !prev)}
+                                className="px-2 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-emerald-300 font-medium whitespace-nowrap"
+                              >
+                                + Nova Categoria
+                              </button>
+                              <div className="relative">
+                                <Search className="w-3 h-3 text-slate-500 absolute left-2 top-1/2 -translate-y-1/2" />
+                                <input
+                                  type="text"
+                                  value={historySearch}
+                                  onChange={(e) => setHistorySearch(e.target.value)}
+                                  placeholder="Buscar item ou categoria..."
+                                  className="pl-6 pr-2 py-1 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-white placeholder:text-slate-600 focus:outline-none w-44"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Inline New Category Creator */}
+                          {isCreatingHistoryCat && (
+                            <div className="px-3 py-2 bg-slate-900/80 border-b border-slate-800 flex flex-wrap items-center gap-2 text-xs">
+                              <span className="text-slate-300 font-medium">Nova categoria:</span>
+                              <input
+                                type="text"
+                                value={newHistoryCategoryName}
+                                onChange={(e) => setNewHistoryCategoryName(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') handleCreateInlineHistoryCategory();
+                                }}
+                                placeholder="Ex: Perfumaria, Matinais, Frios..."
+                                className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:border-emerald-500 focus:outline-none w-56"
+                              />
+                              <button
+                                type="button"
+                                onClick={handleCreateInlineHistoryCategory}
+                                disabled={!newHistoryCategoryName.trim() || isUpdatingCategories}
+                                className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-semibold"
+                              >
+                                {selectedHistoryProductIds.length > 0
+                                  ? `Criar e Mover (${selectedHistoryProductIds.length})`
+                                  : 'Criar Categoria'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsCreatingHistoryCat(false);
+                                  setNewHistoryCategoryName('');
+                                }}
+                                className="px-2 py-1 text-slate-400 hover:text-white text-xs"
+                              >
+                                Cancelar
+                              </button>
+                            </div>
+                          )}
+
+                          {/* Bulk Reassignment Toolbar when items are checked */}
+                          {selectedHistoryProductIds.length > 0 && onBulkUpdateCategories && (
+                            <div className="px-3 py-2 bg-emerald-950/30 border-b border-emerald-500/30 flex flex-wrap items-center justify-between gap-2 text-xs">
+                              <span className="text-emerald-200 font-semibold font-mono tabular-nums">
+                                {selectedHistoryProductIds.length}{' '}
+                                {selectedHistoryProductIds.length === 1 ? 'produto selecionado' : 'produtos selecionados'}
+                              </span>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-slate-300">Mover para:</span>
+                                <select
+                                  value={bulkTargetCategory}
+                                  onChange={(e) => setBulkTargetCategory(e.target.value)}
+                                  className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:border-emerald-500 focus:outline-none"
+                                >
+                                  {availableCategories.map((cat) => (
+                                    <option key={cat} value={cat}>
+                                      {cat}
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  type="button"
+                                  disabled={isUpdatingCategories}
+                                  onClick={() =>
+                                    handleQuickCategoryChange(selectedHistoryProductIds, bulkTargetCategory)
+                                  }
+                                  className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold transition-colors"
+                                >
+                                  {isUpdatingCategories ? 'Salvando...' : 'Aplicar em Lote'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedHistoryProductIds([])}
+                                  className="px-2 py-1 text-slate-400 hover:text-white text-xs"
+                                >
+                                  Limpar
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {categoryUpdateMsg && (
+                            <div className="px-3 py-1.5 bg-emerald-950/40 border-b border-emerald-500/30 text-xs text-emerald-200 flex items-center gap-2">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                              <span>{categoryUpdateMsg}</span>
+                            </div>
+                          )}
+
+                          <div className="max-h-72 overflow-y-auto">
+                            <table className="w-full text-left text-xs">
+                              <thead className="bg-slate-900/70 text-slate-400 border-b border-slate-800 sticky top-0 z-10">
+                                <tr>
+                                  {onBulkUpdateCategories && (
+                                    <th className="py-1.5 pl-3 pr-1 w-7">
+                                      <input
+                                        type="checkbox"
+                                        checked={allVisibleSelected}
+                                        onChange={toggleSelectAllVisible}
+                                        aria-label="Selecionar todos os itens visíveis"
+                                        className="rounded border-slate-700 bg-slate-950 text-emerald-500 focus:ring-emerald-500"
+                                      />
+                                    </th>
+                                  )}
+                                  <th className="py-1.5 px-3 font-medium">Item</th>
+                                  <th className="py-1.5 px-3 font-medium">Categoria (Edição Rápida)</th>
+                                  <th className="py-1.5 px-3 font-medium text-right">Custo</th>
+                                  <th className="py-1.5 px-3 font-medium text-right">Venda</th>
+                                  <th className="py-1.5 px-3 font-medium text-right">Variação</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-800/60">
+                                {visibleChanges.length === 0 ? (
+                                  <tr>
+                                    <td colSpan={onBulkUpdateCategories ? 6 : 5} className="py-5 text-center text-slate-500">
+                                      Nenhum item encontrado nessa categoria ou busca.
+                                    </td>
+                                  </tr>
+                                ) : (
+                                  visibleChanges.map((chg, idx) => {
+                                    const isChecked = selectedHistoryProductIds.includes(chg.productId);
+                                    const rowCategories = availableCategories.includes(chg.resolvedCategory)
+                                      ? availableCategories
+                                      : [chg.resolvedCategory, ...availableCategories];
+
+                                    return (
+                                      <tr
+                                        key={`${run.id}-${chg.productId}-${idx}`}
+                                        className={isChecked ? 'bg-emerald-950/20' : 'hover:bg-slate-900/40'}
+                                      >
+                                        {onBulkUpdateCategories && (
+                                          <td className="py-1.5 pl-3 pr-1">
+                                            <input
+                                              type="checkbox"
+                                              disabled={!chg.existsInCatalog}
+                                              checked={isChecked}
+                                              onChange={() => toggleSelectOne(chg.productId)}
+                                              aria-label={`Selecionar ${chg.name}`}
+                                              className="rounded border-slate-700 bg-slate-950 text-emerald-500 focus:ring-emerald-500 disabled:opacity-30"
+                                            />
+                                          </td>
+                                        )}
+                                        <td className="py-1.5 px-3">
+                                          {chg.existsInCatalog && onOpenProductInCatalog ? (
+                                            <button
+                                              type="button"
+                                              onClick={() => onOpenProductInCatalog(chg.productId)}
+                                              className="text-left text-slate-100 hover:text-emerald-300 font-medium truncate max-w-[180px] block transition-colors"
+                                              title="Abrir produto no Catálogo & Fichas"
+                                            >
+                                              {chg.name}
+                                            </button>
+                                          ) : (
+                                            <span className="text-slate-200 truncate max-w-[180px] block">
+                                              {chg.name}
+                                            </span>
+                                          )}
+                                        </td>
+                                        <td className="py-1.5 px-3">
+                                          {chg.existsInCatalog && onBulkUpdateCategories ? (
+                                            <select
+                                              value={chg.resolvedCategory}
+                                              disabled={isUpdatingCategories}
+                                              onChange={(e) =>
+                                                handleQuickCategoryChange([chg.productId], e.target.value)
+                                              }
+                                              aria-label={`Alterar categoria de ${chg.name}`}
+                                              className="px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 hover:border-cyan-500/60 text-xs text-cyan-300 font-medium focus:border-emerald-500 focus:outline-none max-w-[165px] cursor-pointer"
+                                            >
+                                              {rowCategories.map((cat) => (
+                                                <option key={cat} value={cat} className="bg-slate-950 text-white">
+                                                  {cat}
+                                                </option>
+                                              ))}
+                                            </select>
+                                          ) : (
+                                            <span className="text-cyan-300 font-medium whitespace-nowrap">
+                                              {chg.resolvedCategory}
+                                            </span>
+                                          )}
+                                        </td>
+                                        <td className="py-1.5 px-3 text-right font-mono tabular-nums text-slate-300 whitespace-nowrap">
+                                          {chg.oldCost !== null && chg.oldCost !== chg.newCost
+                                            ? `${formatBRL(chg.oldCost)} → ${formatBRL(chg.newCost)}`
+                                            : formatBRL(chg.newCost)}
+                                        </td>
+                                        <td className="py-1.5 px-3 text-right font-mono tabular-nums text-emerald-300 whitespace-nowrap">
+                                          {formatBRL(chg.newPrice)}
+                                        </td>
+                                        <td className="py-1.5 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                                          {chg.action === 'created' && <span className="text-emerald-400">Novo</span>}
+                                          {chg.action === 'cost_increased' && (
+                                            <span className="text-rose-400">+{chg.diffPercent.toFixed(1)}%</span>
+                                          )}
+                                          {chg.action === 'cost_decreased' && (
+                                            <span className="text-cyan-400">{chg.diffPercent.toFixed(1)}%</span>
+                                          )}
+                                          {chg.action === 'unchanged' && <span className="text-slate-500">0%</span>}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
                         </div>
                       )}
                     </div>

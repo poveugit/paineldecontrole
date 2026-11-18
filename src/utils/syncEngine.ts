@@ -44,6 +44,7 @@ export function createDefaultSyncConfig(defaultChannelId = 'direct-zero'): Exter
     autoUpdateCost: true,
     autoRecalculateSellingPrice: true,
     defaultTargetMargin: 0.25,
+    defaultTargetProfitBRL: 0,
     referenceChannelId: defaultChannelId,
     priceRounding: '90',
     minPriceChangeAlertPercent: 1,
@@ -113,14 +114,27 @@ export function computeResaleSellingPrice(
   cost: number,
   targetNetMargin: number,
   channelFeeRatePercent: number,
-  rounding: 'none' | '90' | '99' = 'none'
+  rounding: 'none' | '90' | '99' = 'none',
+  targetNetProfitBRL?: number
 ): number {
   const safeCost = Math.max(0, Number(cost) || 0);
-  if (safeCost <= 0) return 0;
-  const marginDecimal = Math.min(0.85, Math.max(0.01, Number(targetNetMargin) || 0.25));
+  const fixedProfitBRL =
+    typeof targetNetProfitBRL === 'number' && isFinite(targetNetProfitBRL) && targetNetProfitBRL > 0
+      ? targetNetProfitBRL
+      : 0;
+  if (safeCost <= 0 && fixedProfitBRL <= 0) return 0;
+
   const feeDecimal = Math.min(0.60, Math.max(0, (Number(channelFeeRatePercent) || 0) / 100));
-  const denominator = 1 - marginDecimal - feeDecimal;
-  let rawPrice = denominator > 0.05 ? safeCost / denominator : safeCost * 2.5;
+  let rawPrice = 0;
+
+  if (fixedProfitBRL > 0) {
+    const denominator = 1 - feeDecimal;
+    rawPrice = denominator > 0.02 ? (safeCost + fixedProfitBRL) / denominator : safeCost + fixedProfitBRL;
+  } else {
+    const marginDecimal = Math.min(0.85, Math.max(0.01, Number(targetNetMargin) || 0.25));
+    const denominator = 1 - marginDecimal - feeDecimal;
+    rawPrice = denominator > 0.05 ? safeCost / denominator : safeCost * 2.5;
+  }
 
   if (rounding === '90' && rawPrice >= 1) {
     const base90 = Math.floor(rawPrice) + 0.9;
@@ -378,14 +392,26 @@ export function reconcileExternalCatalog(
 
       if (Math.abs(costDiff) >= 0.01 && config.autoUpdateCost) {
         const marginToUse = Number(existing.targetNetMargin) || config.defaultTargetMargin || 0.25;
+        const configProfitBRL =
+          typeof config.defaultTargetProfitBRL === 'number' && config.defaultTargetProfitBRL > 0
+            ? config.defaultTargetProfitBRL
+            : undefined;
+        const effectiveProfitBRL =
+          configProfitBRL ??
+          (typeof existing.targetNetProfitBRL === 'number' && existing.targetNetProfitBRL > 0
+            ? existing.targetNetProfitBRL
+            : undefined);
+        const channelFeeForProd = existing.referenceChannelId
+          ? channels.find((c) => c.id === existing.referenceChannelId)?.totalRate ?? feeRate
+          : feeRate;
+
         const recalculatedPrice = config.autoRecalculateSellingPrice
           ? computeResaleSellingPrice(
               newCost,
               marginToUse,
-              existing.referenceChannelId
-                ? channels.find((c) => c.id === existing.referenceChannelId)?.totalRate ?? feeRate
-                : feeRate,
-              config.priceRounding
+              channelFeeForProd,
+              config.priceRounding,
+              effectiveProfitBRL
             )
           : oldPrice;
 
@@ -394,6 +420,7 @@ export function reconcileExternalCatalog(
           cost: newCost,
           previousCost: oldCost,
           currentPrice: recalculatedPrice,
+          targetNetProfitBRL: effectiveProfitBRL,
           costMethod: 'manual',
           externalSource: 'superluna',
           externalId: item.externalId || existing.externalId || item.sku,
@@ -455,11 +482,16 @@ export function reconcileExternalCatalog(
       const sku = (item.sku || item.externalId || `SL-${Math.abs(hashShort(nameKey))}`).toUpperCase().slice(0, 24);
       const category = item.category || inferCategoryFromName(item.name);
       const unit = item.unit || inferUnitFromName(item.name);
+      const configProfitBRL =
+        typeof config.defaultTargetProfitBRL === 'number' && config.defaultTargetProfitBRL > 0
+          ? config.defaultTargetProfitBRL
+          : undefined;
       const sellingPrice = computeResaleSellingPrice(
         newCost,
         config.defaultTargetMargin,
         feeRate,
-        config.priceRounding
+        config.priceRounding,
+        configProfitBRL
       );
 
       const newProduct = normalizeProduct({
@@ -471,6 +503,7 @@ export function reconcileExternalCatalog(
         previousCost: newCost,
         currentPrice: sellingPrice,
         targetNetMargin: config.defaultTargetMargin,
+        targetNetProfitBRL: configProfitBRL,
         estimatedMonthlyUnits: 0,
         unit,
         currentStock: 0,
@@ -513,11 +546,11 @@ export function reconcileExternalCatalog(
     }
   }
 
-  // Keep change log compact (prioritize real price changes & creations, max 80 entries in runLog)
+  // Keep change log compact (prioritize real price changes & creations, max 200 entries in runLog)
   const prioritizedChanges = [
     ...diffItems.filter((d) => d.action !== 'unchanged'),
-    ...diffItems.filter((d) => d.action === 'unchanged').slice(0, 15),
-  ].slice(0, 80);
+    ...diffItems.filter((d) => d.action === 'unchanged').slice(0, 25),
+  ].slice(0, 200);
 
   const runLog: ExternalSyncRunLog = {
     id: `sync-${Date.now()}`,

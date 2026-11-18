@@ -98,6 +98,7 @@ export interface ExternalSyncConfig {
   autoUpdateCost: boolean;
   autoRecalculateSellingPrice: boolean;
   defaultTargetMargin: number; // ex: 0.25 (25%)
+  defaultTargetProfitBRL?: number; // Lucro líquido desejado fixo em R$ por unidade (opcional; sobrepõe margem %)
   referenceChannelId: string;
   priceRounding: 'none' | '90' | '99';
   minPriceChangeAlertPercent: number;
