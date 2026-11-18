@@ -1,20 +1,9 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import express from 'express';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
-import {
-  ChannelFee,
-  ExternalSyncConfig,
-  ExternalSyncRunLog,
-  ProductItem,
-} from '../src/types/pricing';
-import {
-  createDefaultSyncConfig,
-  parseExternalCatalogPayload,
-  reconcileExternalCatalog,
-} from '../src/utils/syncEngine';
-import { INITIAL_CHANNELS, normalizeProduct } from '../src/utils/pricingEngine';
 
 dotenv.config();
 
@@ -573,16 +562,593 @@ function generateFallbackReport(products: any[], channels: any[]) {
 }
 
 // ================= EXTERNAL SUPPLIER SYNC API (SUPERLUNA & WEBHOOKS) =================
+// Self-contained helpers so Vercel Serverless Functions never fail resolving ../src TypeScript imports under ESM
+
+interface ServerChannelFee {
+  id: string;
+  platform: string;
+  platformName: string;
+  name: string;
+  totalRate: number;
+  highlight?: boolean;
+}
+
+interface ServerProductItem {
+  id: string;
+  sku?: string;
+  name: string;
+  category: string;
+  cost: number;
+  currentPrice: number;
+  targetNetMargin: number;
+  estimatedMonthlyUnits: number;
+  unit?: string;
+  currentStock?: number;
+  minStock?: number;
+  maxStock?: number;
+  costMethod?: 'manual' | 'recipe';
+  description?: string;
+  isCustom?: boolean;
+  active?: boolean;
+  ingredients?: unknown[];
+  stockHistory?: unknown[];
+  targetNetProfitBRL?: number;
+  referenceChannelId?: string;
+  externalSource?: string;
+  externalId?: string;
+  externalUrl?: string;
+  previousCost?: number;
+  lastCostSyncAt?: string;
+  [key: string]: unknown;
+}
+
+interface ServerExternalSyncConfig {
+  id: string;
+  enabled: boolean;
+  sourceName: string;
+  sourceUrl: string;
+  storeBranchLabel: string;
+  apiToken: string;
+  autoCreateNew: boolean;
+  autoUpdateCost: boolean;
+  autoRecalculateSellingPrice: boolean;
+  defaultTargetMargin: number;
+  defaultTargetProfitBRL?: number;
+  referenceChannelId: string;
+  priceRounding: 'none' | '90' | '99';
+  minPriceChangeAlertPercent: number;
+  targetPaths?: string[];
+  updatedAt?: string;
+}
+
+interface ServerExternalSyncProductInput {
+  externalId?: string;
+  sku?: string;
+  ean?: string;
+  name: string;
+  category?: string;
+  price: number;
+  promoPrice?: number;
+  unit?: string;
+  url?: string;
+  inStock?: boolean;
+  storeBranch?: string;
+}
+
+interface ServerExternalSyncDiffItem {
+  action: 'created' | 'cost_increased' | 'cost_decreased' | 'unchanged';
+  productId: string;
+  sku: string;
+  name: string;
+  category: string;
+  oldCost: number | null;
+  newCost: number;
+  oldPrice: number | null;
+  newPrice: number;
+  diffPercent: number;
+}
+
+interface ServerExternalSyncRunLog {
+  id: string;
+  timestamp: string;
+  source: string;
+  sourceLabel: string;
+  trigger: 'api_webhook' | 'manual_import' | 'browser_script';
+  totalReceived: number;
+  createdCount: number;
+  updatedCount: number;
+  unchangedCount: number;
+  priceIncreases: number;
+  priceDecreases: number;
+  changes: ServerExternalSyncDiffItem[];
+}
+
+const SERVER_INITIAL_CHANNELS: ServerChannelFee[] = [
+  { id: 'uai-online', platform: 'uai_rango', platformName: 'Uai Rango', name: 'Uai Rango Pagamento Online', totalRate: 17.49, highlight: true },
+  { id: 'uai-credito', platform: 'uai_rango', platformName: 'Uai Rango', name: 'Uai Rango Pagamentos Crédito', totalRate: 16.44 },
+  { id: 'uai-debito', platform: 'uai_rango', platformName: 'Uai Rango', name: 'Uai Rango Pagamentos Débito', totalRate: 13.94 },
+  { id: 'uai-dinheiro', platform: 'uai_rango', platformName: 'Uai Rango', name: 'Uai Rango Pagamentos no Dinheiro', totalRate: 12.0 },
+  { id: 'tf-credito', platform: 'tchau_fome', platformName: 'Tchau Fome', name: 'Tchau Fome Crédito', totalRate: 12.44 },
+  { id: 'tf-debito', platform: 'tchau_fome', platformName: 'Tchau Fome', name: 'Tchau Fome Débito', totalRate: 9.94 },
+  { id: 'tf-pix', platform: 'tchau_fome', platformName: 'Tchau Fome', name: 'Tchau Fome PIX', totalRate: 8.99, highlight: true },
+  { id: 'tf-dinheiro', platform: 'tchau_fome', platformName: 'Tchau Fome', name: 'Tchau Fome Dinheiro', totalRate: 8.0 },
+  { id: 'ifood-credito', platform: 'ifood', platformName: 'iFood Plano Básico', name: 'iFood Pagamentos Crédito', totalRate: 9.89 },
+  { id: 'ifood-online', platform: 'ifood', platformName: 'iFood Plano Básico', name: 'iFood Pagamento Online', totalRate: 9.5, highlight: true },
+  { id: 'ifood-debito', platform: 'ifood', platformName: 'iFood Plano Básico', name: 'iFood Pagamentos Débito', totalRate: 7.49 },
+  { id: 'ifood-dinheiro', platform: 'ifood', platformName: 'iFood Plano Básico', name: 'iFood Pagamentos em Dinheiro', totalRate: 6.0 },
+  { id: 'balcao-pix', platform: 'balcao', platformName: 'Balcão / WhatsApp Próprio', name: 'Venda Direta PIX', totalRate: 1.0 },
+  { id: 'balcao-debito', platform: 'balcao', platformName: 'Balcão / WhatsApp Próprio', name: 'Maquininha Débito', totalRate: 1.94 },
+  { id: 'balcao-credito', platform: 'balcao', platformName: 'Balcão / WhatsApp Próprio', name: 'Maquininha Crédito', totalRate: 4.44 },
+];
+
+function srvNormalizeSearchText(text?: string | null): string {
+  return (text ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
+function srvSanitizeFirestoreId(raw: string): string {
+  const cleaned = String(raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9_-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 120);
+  return cleaned || `item-${Date.now()}`;
+}
+
+function srvHashShort(str: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h % 1000000;
+}
+
+function srvNormalizeProduct(product: ServerProductItem): ServerProductItem {
+  const hasExplicitCost =
+    product.cost !== undefined && product.cost !== null && !Number.isNaN(Number(product.cost));
+  const currentCost = hasExplicitCost ? Number(product.cost) : 6.89;
+  const ingredients = Array.isArray(product.ingredients) ? product.ingredients : [];
+  const stockHistory = Array.isArray(product.stockHistory) ? product.stockHistory : [];
+  return {
+    ...product,
+    cost: currentCost,
+    sku: product.sku || `PRD-${String(product.id || '').slice(-4).toUpperCase()}`,
+    unit: product.unit || 'un',
+    currentStock: product.currentStock ?? 50,
+    minStock: product.minStock ?? 15,
+    maxStock: product.maxStock ?? 150,
+    costMethod: product.costMethod || 'manual',
+    active: product.active ?? true,
+    ingredients,
+    stockHistory,
+  };
+}
+
+function srvCreateDefaultSyncConfig(defaultChannelId = 'direct-zero'): ServerExternalSyncConfig {
+  return {
+    id: 'external_sync_config',
+    enabled: true,
+    sourceName: 'SuperLuna Supermercados',
+    sourceUrl: 'https://www.superlunasupermercados.com.br/',
+    storeBranchLabel: 'SuperLuna — Loja da Cidade',
+    apiToken: '',
+    autoCreateNew: true,
+    autoUpdateCost: true,
+    autoRecalculateSellingPrice: true,
+    defaultTargetMargin: 0.25,
+    defaultTargetProfitBRL: 0,
+    referenceChannelId: defaultChannelId,
+    priceRounding: '90',
+    minPriceChangeAlertPercent: 1,
+    targetPaths: ['/p/categoria/4750/mercearia'],
+  };
+}
+
+function srvParseMonetaryValue(val: unknown): number {
+  if (typeof val === 'number') return isFinite(val) && val > 0 ? Number(val.toFixed(2)) : 0;
+  if (typeof val !== 'string') return 0;
+  let cleaned = val.replace(/R\$/gi, '').replace(/[^\d.,-]/g, '').trim();
+  if (!cleaned) return 0;
+  if (cleaned.includes(',') && cleaned.includes('.')) {
+    cleaned = cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')
+      ? cleaned.replace(/\./g, '').replace(',', '.')
+      : cleaned.replace(/,/g, '');
+  } else if (cleaned.includes(',')) {
+    cleaned = cleaned.replace(',', '.');
+  }
+  const num = parseFloat(cleaned);
+  return isFinite(num) && num > 0 ? Number(num.toFixed(2)) : 0;
+}
+
+function srvInferUnitFromName(name: string): string {
+  const lower = srvNormalizeSearchText(name);
+  if (/\b\d+\s*kg\b|\bkg\b/.test(lower)) return 'kg';
+  if (/\b\d+\s*l\b|\blitro\b/.test(lower)) return 'l';
+  if (/\b350\s*ml\b|\blata\b/.test(lower)) return 'lata';
+  if (/\bcx\b|\bcaixa\b|\bfardo\b|\bpct\b|\bpacote\b/.test(lower)) return 'pct';
+  return 'un';
+}
+
+function srvInferCategoryFromName(name: string, fallback = 'Mercearia'): string {
+  const lower = srvNormalizeSearchText(name);
+  if (/coca|guarana|fanta|sprite|refrigerante|suco|agua|cerveja|vinho|energetico|leite/.test(lower)) return 'Bebidas';
+  if (/arroz|feijao|acucar|oleo|azeite|macarrao|farinha|cafe|sal|molho|tempero/.test(lower)) return 'Mercearia';
+  if (/carne|frango|bovino|suino|picanha|alcatra|linguica|salsicha|bacon|peixe/.test(lower)) return 'Açougue & Frios';
+  if (/queijo|mussarela|presunto|requeijao|manteiga|iogurte|mortadela/.test(lower)) return 'Laticínios & Frios';
+  if (/sabao|detergente|amaciante|agua sanitaria|desinfetante|papel higienico|limpador/.test(lower)) return 'Limpeza & Higiene';
+  if (/banana|maca|tomate|cebola|batata|alho|laranja|limao|hortifruti/.test(lower)) return 'Hortifruti';
+  if (/biscoito|bolacha|chocolate|bombon|salgadinho|doces|sorvete/.test(lower)) return 'Doces & Snacks';
+  return fallback;
+}
+
+function srvComputeResaleSellingPrice(
+  cost: number,
+  targetNetMargin: number,
+  channelFeeRatePercent: number,
+  rounding: 'none' | '90' | '99' = 'none',
+  targetNetProfitBRL?: number
+): number {
+  const safeCost = Math.max(0, Number(cost) || 0);
+  const fixedProfitBRL =
+    typeof targetNetProfitBRL === 'number' && isFinite(targetNetProfitBRL) && targetNetProfitBRL > 0
+      ? targetNetProfitBRL
+      : 0;
+  if (safeCost <= 0 && fixedProfitBRL <= 0) return 0;
+
+  const feeDecimal = Math.min(0.6, Math.max(0, (Number(channelFeeRatePercent) || 0) / 100));
+  let rawPrice = 0;
+
+  if (fixedProfitBRL > 0) {
+    const denominator = 1 - feeDecimal;
+    rawPrice = denominator > 0.02 ? (safeCost + fixedProfitBRL) / denominator : safeCost + fixedProfitBRL;
+  } else {
+    const marginDecimal = Math.min(0.85, Math.max(0.01, Number(targetNetMargin) || 0.25));
+    const denominator = 1 - marginDecimal - feeDecimal;
+    rawPrice = denominator > 0.05 ? safeCost / denominator : safeCost * 2.5;
+  }
+
+  if (rounding === '90' && rawPrice >= 1) {
+    const base90 = Math.floor(rawPrice) + 0.9;
+    rawPrice = base90 >= rawPrice ? base90 : Math.floor(rawPrice) + 1.9;
+  } else if (rounding === '99' && rawPrice >= 1) {
+    const base99 = Math.floor(rawPrice) + 0.99;
+    rawPrice = base99 >= rawPrice ? base99 : Math.floor(rawPrice) + 1.99;
+  }
+
+  return Number(rawPrice.toFixed(2));
+}
+
+function srvNormalizeIncomingItem(raw: Record<string, unknown>): ServerExternalSyncProductInput | null {
+  const name = String(
+    raw.name ?? raw.nome ?? raw.title ?? raw.titulo ?? raw.descricao ?? raw.description ?? raw.produto ?? ''
+  ).trim();
+  if (!name) return null;
+
+  const regularPrice = srvParseMonetaryValue(
+    raw.price ?? raw.preco ?? raw.valor ?? raw.precoVenda ?? raw.precoPor ?? raw.preco_de
+  );
+  const promoPrice = srvParseMonetaryValue(
+    raw.promoPrice ?? raw.precoPromocao ?? raw.preco_promocao ?? raw.precoOferta ?? raw.oferta
+  );
+  const effectivePrice =
+    promoPrice > 0 && (regularPrice <= 0 || promoPrice < regularPrice) ? promoPrice : regularPrice;
+  if (effectivePrice <= 0) return null;
+
+  const rawSku = raw.sku ?? raw.codigo ?? raw.codigoBarras ?? raw.ean ?? raw.gtin ?? raw.code ?? raw.id;
+  const rawExternalId = raw.externalId ?? raw.id ?? raw.codigo ?? raw.sku ?? raw.ean;
+
+  return {
+    externalId: rawExternalId ? String(rawExternalId).trim() : undefined,
+    sku: rawSku ? String(rawSku).trim() : undefined,
+    ean: raw.ean ? String(raw.ean).trim() : undefined,
+    name,
+    category: raw.category ? String(raw.category).trim() : raw.categoria ? String(raw.categoria).trim() : undefined,
+    price: effectivePrice,
+    promoPrice: promoPrice > 0 ? promoPrice : undefined,
+    unit: raw.unit ? String(raw.unit).trim() : raw.unidade ? String(raw.unidade).trim() : undefined,
+    url: raw.url ? String(raw.url).trim() : raw.link ? String(raw.link).trim() : undefined,
+    inStock: typeof raw.inStock === 'boolean' ? raw.inStock : true,
+    storeBranch: raw.storeBranch ? String(raw.storeBranch).trim() : undefined,
+  };
+}
+
+function srvParseExternalCatalogPayload(rawTextOrArray: string | unknown[]): ServerExternalSyncProductInput[] {
+  if (Array.isArray(rawTextOrArray)) {
+    return rawTextOrArray
+      .map((item) => (item && typeof item === 'object' ? srvNormalizeIncomingItem(item as Record<string, unknown>) : null))
+      .filter((x): x is ServerExternalSyncProductInput => x !== null);
+  }
+  const trimmed = String(rawTextOrArray || '').trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const list = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.products)
+        ? parsed.products
+        : Array.isArray(parsed?.items)
+        ? parsed.items
+        : Array.isArray(parsed?.produtos)
+        ? parsed.produtos
+        : [];
+      return list
+        .map((item: unknown) =>
+          item && typeof item === 'object' ? srvNormalizeIncomingItem(item as Record<string, unknown>) : null
+        )
+        .filter((x: ServerExternalSyncProductInput | null): x is ServerExternalSyncProductInput => x !== null);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function srvReconcileExternalCatalog(
+  existingProducts: ServerProductItem[],
+  incomingItems: ServerExternalSyncProductInput[],
+  channels: ServerChannelFee[],
+  config: ServerExternalSyncConfig,
+  trigger: 'api_webhook' | 'manual_import' | 'browser_script'
+) {
+  const refChannel =
+    config.referenceChannelId === 'direct-zero'
+      ? null
+      : channels.find((c) => c.id === config.referenceChannelId) || channels[0] || null;
+  const feeRate = refChannel ? Number(refChannel.totalRate) || 0 : 0;
+  const nowIso = new Date().toISOString();
+
+  const dedupedMap = new Map<string, ServerExternalSyncProductInput>();
+  for (const item of incomingItems) {
+    const key =
+      (item.externalId && `ext:${srvNormalizeSearchText(item.externalId)}`) ||
+      (item.sku && `sku:${srvNormalizeSearchText(item.sku)}`) ||
+      `name:${srvNormalizeSearchText(item.name)}`;
+    dedupedMap.set(key, item);
+  }
+  const uniqueIncoming = Array.from(dedupedMap.values());
+
+  const nextProducts = [...existingProducts];
+  const byExternalId = new Map<string, number>();
+  const bySku = new Map<string, number>();
+  const byName = new Map<string, number>();
+
+  nextProducts.forEach((p, idx) => {
+    if (p.externalId) byExternalId.set(srvNormalizeSearchText(p.externalId), idx);
+    if (p.sku) bySku.set(srvNormalizeSearchText(p.sku), idx);
+    byName.set(srvNormalizeSearchText(p.name), idx);
+  });
+
+  const productsToSaveMap = new Map<string, ServerProductItem>();
+  const diffItems: ServerExternalSyncDiffItem[] = [];
+  let createdCount = 0;
+  let updatedCount = 0;
+  let unchangedCount = 0;
+  let priceIncreases = 0;
+  let priceDecreases = 0;
+
+  for (const item of uniqueIncoming) {
+    const newCost = Number(item.price.toFixed(2));
+    if (newCost <= 0) continue;
+
+    const extKey = item.externalId ? srvNormalizeSearchText(item.externalId) : '';
+    const skuKey = item.sku ? srvNormalizeSearchText(item.sku) : '';
+    const nameKey = srvNormalizeSearchText(item.name);
+
+    let matchIdx = -1;
+    if (extKey && byExternalId.has(extKey)) matchIdx = byExternalId.get(extKey)!;
+    else if (skuKey && bySku.has(skuKey)) matchIdx = bySku.get(skuKey)!;
+    else if (byName.has(nameKey)) matchIdx = byName.get(nameKey)!;
+
+    if (matchIdx !== -1) {
+      const existing = nextProducts[matchIdx];
+      const oldCost = Number(existing.cost) || 0;
+      const oldPrice = Number(existing.currentPrice) || 0;
+      const costDiff = Number((newCost - oldCost).toFixed(2));
+      const diffPercent = oldCost > 0 ? Number((((newCost - oldCost) / oldCost) * 100).toFixed(2)) : 0;
+
+      if (Math.abs(costDiff) >= 0.01 && config.autoUpdateCost) {
+        const marginToUse = Number(existing.targetNetMargin) || config.defaultTargetMargin || 0.25;
+        const configProfitBRL =
+          typeof config.defaultTargetProfitBRL === 'number' && config.defaultTargetProfitBRL > 0
+            ? config.defaultTargetProfitBRL
+            : undefined;
+        const effectiveProfitBRL =
+          configProfitBRL ??
+          (typeof existing.targetNetProfitBRL === 'number' && existing.targetNetProfitBRL > 0
+            ? existing.targetNetProfitBRL
+            : undefined);
+        const channelFeeForProd = existing.referenceChannelId
+          ? channels.find((c) => c.id === existing.referenceChannelId)?.totalRate ?? feeRate
+          : feeRate;
+
+        const recalculatedPrice = config.autoRecalculateSellingPrice
+          ? srvComputeResaleSellingPrice(
+              newCost,
+              marginToUse,
+              channelFeeForProd,
+              config.priceRounding,
+              effectiveProfitBRL
+            )
+          : oldPrice;
+
+        const updatedProduct = srvNormalizeProduct({
+          ...existing,
+          cost: newCost,
+          previousCost: oldCost,
+          currentPrice: recalculatedPrice,
+          targetNetProfitBRL: effectiveProfitBRL,
+          costMethod: 'manual',
+          externalSource: 'superluna',
+          externalId: item.externalId || existing.externalId || item.sku,
+          externalUrl: item.url || existing.externalUrl,
+          lastCostSyncAt: nowIso,
+          ...(item.inStock !== undefined ? { active: item.inStock } : {}),
+        });
+
+        nextProducts[matchIdx] = updatedProduct;
+        productsToSaveMap.set(updatedProduct.id, updatedProduct);
+        updatedCount++;
+
+        const action = costDiff > 0 ? 'cost_increased' : 'cost_decreased';
+        if (costDiff > 0) priceIncreases++;
+        else priceDecreases++;
+
+        diffItems.push({
+          action,
+          productId: updatedProduct.id,
+          sku: updatedProduct.sku || '',
+          name: updatedProduct.name,
+          category: updatedProduct.category,
+          oldCost,
+          newCost,
+          oldPrice,
+          newPrice: updatedProduct.currentPrice,
+          diffPercent,
+        });
+      } else {
+        unchangedCount++;
+        if (!existing.externalId && (item.externalId || item.sku)) {
+          const linked = srvNormalizeProduct({
+            ...existing,
+            externalSource: 'superluna',
+            externalId: item.externalId || item.sku,
+            externalUrl: item.url || existing.externalUrl,
+            lastCostSyncAt: nowIso,
+          });
+          nextProducts[matchIdx] = linked;
+          productsToSaveMap.set(linked.id, linked);
+        }
+        diffItems.push({
+          action: 'unchanged',
+          productId: existing.id,
+          sku: existing.sku || '',
+          name: existing.name,
+          category: existing.category,
+          oldCost,
+          newCost,
+          oldPrice,
+          newPrice: oldPrice,
+          diffPercent: 0,
+        });
+      }
+    } else if (config.autoCreateNew) {
+      const rawIdBase = item.externalId || item.sku || nameKey.slice(0, 24);
+      const id = srvSanitizeFirestoreId(`prod-sl-${rawIdBase}-${Math.abs(srvHashShort(nameKey))}`);
+      const sku = (item.sku || item.externalId || `SL-${Math.abs(srvHashShort(nameKey))}`).toUpperCase().slice(0, 24);
+      const category = item.category || srvInferCategoryFromName(item.name);
+      const unit = item.unit || srvInferUnitFromName(item.name);
+      const configProfitBRL =
+        typeof config.defaultTargetProfitBRL === 'number' && config.defaultTargetProfitBRL > 0
+          ? config.defaultTargetProfitBRL
+          : undefined;
+      const sellingPrice = srvComputeResaleSellingPrice(
+        newCost,
+        config.defaultTargetMargin,
+        feeRate,
+        config.priceRounding,
+        configProfitBRL
+      );
+
+      const newProduct = srvNormalizeProduct({
+        id,
+        sku,
+        name: item.name,
+        category,
+        cost: newCost,
+        previousCost: newCost,
+        currentPrice: sellingPrice,
+        targetNetMargin: config.defaultTargetMargin,
+        targetNetProfitBRL: configProfitBRL,
+        estimatedMonthlyUnits: 0,
+        unit,
+        currentStock: 0,
+        minStock: 5,
+        maxStock: 100,
+        costMethod: 'manual',
+        description: `Importado automaticamente de ${config.sourceName} (${config.storeBranchLabel}).`,
+        isCustom: true,
+        active: item.inStock ?? true,
+        ingredients: [],
+        stockHistory: [],
+        referenceChannelId: config.referenceChannelId === 'direct-zero' ? undefined : config.referenceChannelId,
+        externalSource: 'superluna',
+        externalId: item.externalId || item.sku || sku,
+        externalUrl: item.url,
+        lastCostSyncAt: nowIso,
+      });
+
+      const insertedIdx = nextProducts.length;
+      nextProducts.push(newProduct);
+      if (newProduct.externalId) byExternalId.set(srvNormalizeSearchText(newProduct.externalId), insertedIdx);
+      if (newProduct.sku) bySku.set(srvNormalizeSearchText(newProduct.sku), insertedIdx);
+      byName.set(srvNormalizeSearchText(newProduct.name), insertedIdx);
+
+      productsToSaveMap.set(newProduct.id, newProduct);
+      createdCount++;
+
+      diffItems.push({
+        action: 'created',
+        productId: newProduct.id,
+        sku: newProduct.sku || '',
+        name: newProduct.name,
+        category: newProduct.category,
+        oldCost: null,
+        newCost,
+        oldPrice: null,
+        newPrice: newProduct.currentPrice,
+        diffPercent: 0,
+      });
+    }
+  }
+
+  const prioritizedChanges = [
+    ...diffItems.filter((d) => d.action !== 'unchanged'),
+    ...diffItems.filter((d) => d.action === 'unchanged').slice(0, 25),
+  ].slice(0, 200);
+
+  const runLog: ServerExternalSyncRunLog = {
+    id: `sync-${Date.now()}`,
+    timestamp: nowIso,
+    source: 'superluna',
+    sourceLabel: config.sourceName,
+    trigger,
+    totalReceived: uniqueIncoming.length,
+    createdCount,
+    updatedCount,
+    unchangedCount,
+    priceIncreases,
+    priceDecreases,
+    changes: prioritizedChanges,
+  };
+
+  return {
+    productsToSave: Array.from(productsToSaveMap.values()),
+    diffItems,
+    runLog,
+  };
+}
 
 function loadFirebaseServerConfig() {
   let fileCfg: Record<string, string> = {};
+  const candidates = [path.resolve(process.cwd(), 'firebase-applet-config.json')];
   try {
-    const cfgPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-    if (fs.existsSync(cfgPath)) {
-      fileCfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-    }
+    const dirHere = path.dirname(fileURLToPath(import.meta.url));
+    candidates.push(path.resolve(dirHere, '../firebase-applet-config.json'));
   } catch {
-    // Fallback to environment variables
+    // ignore
+  }
+  for (const cfgPath of candidates) {
+    try {
+      if (fs.existsSync(cfgPath)) {
+        fileCfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        break;
+      }
+    } catch {
+      // try next
+    }
   }
   return {
     projectId: process.env.VITE_FIREBASE_PROJECT_ID || fileCfg.projectId || '',
@@ -684,28 +1250,30 @@ async function fsGetDoc(docPath: string): Promise<Record<string, unknown> | null
 
 async function fsListCollection(colPath: string): Promise<Record<string, unknown>[]> {
   const { baseUrl, apiKey } = getFirestoreBaseUrl();
+  const res = await fetch(`${baseUrl}:runQuery?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId: colPath }],
+      },
+    }),
+  });
+  if (res.status === 404) return [];
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Erro ao listar ${colPath} (${res.status}): ${text.slice(0, 200)}`);
+  }
+  const rows = (await res.json()) as Array<{ document?: any }>;
   const items: Record<string, unknown>[] = [];
-  let pageToken = '';
-
-  do {
-    const qs = new URLSearchParams({ pageSize: '300', key: apiKey });
-    if (pageToken) qs.set('pageToken', pageToken);
-    const res = await fetch(`${baseUrl}/${colPath}?${qs.toString()}`);
-    if (res.status === 404) break;
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Erro ao listar ${colPath} (${res.status}): ${text.slice(0, 200)}`);
-    }
-    const json = await res.json();
-    if (Array.isArray(json.documents)) {
-      for (const docItem of json.documents) {
-        const parsed = fromFirestoreDocument(docItem);
+  if (Array.isArray(rows)) {
+    for (const row of rows) {
+      if (row?.document) {
+        const parsed = fromFirestoreDocument(row.document);
         if (parsed) items.push(parsed);
       }
     }
-    pageToken = json.nextPageToken || '';
-  } while (pageToken);
-
+  }
   return items;
 }
 
@@ -773,8 +1341,8 @@ app.get('/api/sync/status', async (req, res) => {
   try {
     const configDoc = await fsGetDoc('settings/external_sync_config');
     const historyDoc = await fsGetDoc('settings/external_sync_history');
-    const config = (configDoc?.data as ExternalSyncConfig | undefined) || null;
-    const history = Array.isArray(historyDoc?.runs) ? (historyDoc.runs as ExternalSyncRunLog[]) : [];
+    const config = (configDoc?.data as ServerExternalSyncConfig | undefined) || null;
+    const history = Array.isArray(historyDoc?.runs) ? (historyDoc.runs as ServerExternalSyncRunLog[]) : [];
 
     return res.json({
       success: true,
@@ -795,12 +1363,12 @@ app.get('/api/sync/status', async (req, res) => {
 
 app.post('/api/sync/config', async (req, res) => {
   try {
-    const incoming = req.body?.config as ExternalSyncConfig | undefined;
+    const incoming = req.body?.config as ServerExternalSyncConfig | undefined;
     if (!incoming || !incoming.apiToken) {
       return res.status(400).json({ success: false, error: 'Configuração ou token de sincronização inválido.' });
     }
-    const cleanConfig: ExternalSyncConfig = {
-      ...createDefaultSyncConfig(),
+    const cleanConfig: ServerExternalSyncConfig = {
+      ...srvCreateDefaultSyncConfig(),
       ...incoming,
       id: 'external_sync_config',
       updatedAt: new Date().toISOString(),
@@ -828,7 +1396,7 @@ app.post('/api/sync/config', async (req, res) => {
 app.post('/api/sync/preview', async (req, res) => {
   try {
     const rawPayload = req.body?.products ?? req.body?.rawText ?? req.body;
-    const items = parseExternalCatalogPayload(rawPayload);
+    const items = srvParseExternalCatalogPayload(rawPayload);
     if (items.length === 0) {
       return res.status(400).json({
         success: false,
@@ -842,14 +1410,14 @@ app.post('/api/sync/preview', async (req, res) => {
       fsGetDoc('settings/external_sync_config'),
     ]);
 
-    const existingProducts = prodDocs.map((d) => normalizeProduct(d as unknown as ProductItem));
-    const channels = channelDocs.length > 0 ? (channelDocs as unknown as ChannelFee[]) : INITIAL_CHANNELS;
+    const existingProducts = prodDocs.map((d) => srvNormalizeProduct(d as unknown as ServerProductItem));
+    const channels = channelDocs.length > 0 ? (channelDocs as unknown as ServerChannelFee[]) : SERVER_INITIAL_CHANNELS;
     const config =
-      (req.body?.config as ExternalSyncConfig | undefined) ||
-      (configDoc?.data as ExternalSyncConfig | undefined) ||
-      createDefaultSyncConfig(channels[0]?.id || 'direct-zero');
+      (req.body?.config as ServerExternalSyncConfig | undefined) ||
+      (configDoc?.data as ServerExternalSyncConfig | undefined) ||
+      srvCreateDefaultSyncConfig(channels[0]?.id || 'direct-zero');
 
-    const result = reconcileExternalCatalog(existingProducts, items, channels, config, 'manual_import');
+    const result = srvReconcileExternalCatalog(existingProducts, items, channels, config, 'manual_import');
     return res.json({
       success: true,
       dryRun: true,
@@ -867,7 +1435,7 @@ app.post('/api/sync/preview', async (req, res) => {
 app.post('/api/sync/catalog', async (req, res) => {
   try {
     const configDoc = await fsGetDoc('settings/external_sync_config');
-    const savedConfig = (configDoc?.data as ExternalSyncConfig | undefined) || null;
+    const savedConfig = (configDoc?.data as ServerExternalSyncConfig | undefined) || null;
     const token = extractSyncToken(req);
 
     if (!savedConfig || !savedConfig.apiToken) {
@@ -892,7 +1460,7 @@ app.post('/api/sync/catalog', async (req, res) => {
     }
 
     const rawPayload = req.body?.products ?? req.body?.rawText ?? req.body;
-    const items = parseExternalCatalogPayload(rawPayload);
+    const items = srvParseExternalCatalogPayload(rawPayload);
     if (items.length === 0) {
       return res.status(400).json({
         success: false,
@@ -911,13 +1479,13 @@ app.post('/api/sync/catalog', async (req, res) => {
       fsGetDoc('settings/external_sync_history'),
     ]);
 
-    const existingProducts = prodDocs.map((d) => normalizeProduct(d as unknown as ProductItem));
-    const channels = channelDocs.length > 0 ? (channelDocs as unknown as ChannelFee[]) : INITIAL_CHANNELS;
+    const existingProducts = prodDocs.map((d) => srvNormalizeProduct(d as unknown as ServerProductItem));
+    const channels = channelDocs.length > 0 ? (channelDocs as unknown as ServerChannelFee[]) : SERVER_INITIAL_CHANNELS;
     const previousHistory = Array.isArray(historyDoc?.runs)
-      ? (historyDoc.runs as ExternalSyncRunLog[])
+      ? (historyDoc.runs as ServerExternalSyncRunLog[])
       : [];
 
-    const { productsToSave, runLog } = reconcileExternalCatalog(
+    const { productsToSave, runLog } = srvReconcileExternalCatalog(
       existingProducts,
       items,
       channels,
@@ -934,7 +1502,7 @@ app.post('/api/sync/catalog', async (req, res) => {
       },
     }));
 
-    const nextHistory = [runLog, ...previousHistory].slice(0, 40);
+    const nextHistory = [runLog, ...previousHistory].slice(0, 25);
     writes.push({
       docPath: 'settings/external_sync_history',
       data: {
