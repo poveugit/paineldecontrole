@@ -80,6 +80,70 @@ export interface ProductItem {
   primaryFractionGrams?: number; // Fração ativa em gramas usada como custo/preço principal no catálogo
   targetNetProfitBRL?: number; // Meta opcional de lucro líquido fixo em R$ por unidade vendida
   referenceChannelId?: string; // Canal selecionado no estúdio para compor o preço base (ex: 'tf-credito')
+  externalSource?: string; // Origem da sincronização externa (ex: 'superluna')
+  externalId?: string; // Código externo / SKU / EAN na loja de origem
+  externalUrl?: string; // URL do produto no site de origem
+  previousCost?: number; // Custo anterior antes da última sincronização automática
+  lastCostSyncAt?: string; // Data/hora ISO da última atualização automática de custo
+}
+
+export interface ExternalSyncConfig {
+  id: string;
+  enabled: boolean;
+  sourceName: string;
+  sourceUrl: string;
+  storeBranchLabel: string;
+  apiToken: string;
+  autoCreateNew: boolean;
+  autoUpdateCost: boolean;
+  autoRecalculateSellingPrice: boolean;
+  defaultTargetMargin: number; // ex: 0.25 (25%)
+  referenceChannelId: string;
+  priceRounding: 'none' | '90' | '99';
+  minPriceChangeAlertPercent: number;
+  updatedAt?: string;
+}
+
+export interface ExternalSyncProductInput {
+  externalId?: string;
+  sku?: string;
+  ean?: string;
+  name: string;
+  category?: string;
+  price: number;
+  promoPrice?: number;
+  unit?: string;
+  url?: string;
+  inStock?: boolean;
+  storeBranch?: string;
+}
+
+export interface ExternalSyncDiffItem {
+  action: 'created' | 'cost_increased' | 'cost_decreased' | 'unchanged';
+  productId: string;
+  sku: string;
+  name: string;
+  category: string;
+  oldCost: number | null;
+  newCost: number;
+  oldPrice: number | null;
+  newPrice: number;
+  diffPercent: number;
+}
+
+export interface ExternalSyncRunLog {
+  id: string;
+  timestamp: string;
+  source: string;
+  sourceLabel: string;
+  trigger: 'api_webhook' | 'manual_import' | 'browser_script';
+  totalReceived: number;
+  createdCount: number;
+  updatedCount: number;
+  unchangedCount: number;
+  priceIncreases: number;
+  priceDecreases: number;
+  changes: ExternalSyncDiffItem[];
 }
 
 export interface FixedExpenses {
@@ -188,4 +252,3 @@ export interface WhatIfScenario {
   calculatedMonthlyProfit: number;
   calculatedMarginPercent: number;
 }
-

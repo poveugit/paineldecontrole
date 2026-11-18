@@ -26,6 +26,11 @@
         "primaryFractionGrams": { "type": "number", "description": "Active fractional weight in grams used as main catalog price" },
         "targetNetProfitBRL": { "type": "number", "description": "Optional fixed target net profit in BRL per unit sold" },
         "referenceChannelId": { "type": "string", "description": "Selected channel ID used to compute the product base selling price" },
+        "externalSource": { "type": "string", "description": "Origin store identifier for automatic resale price sync" },
+        "externalId": { "type": "string", "description": "Supplier SKU or external product identifier" },
+        "externalUrl": { "type": "string", "description": "Supplier product URL" },
+        "previousCost": { "type": "number", "description": "Previous cost recorded prior to the latest external sync" },
+        "lastCostSyncAt": { "type": "string", "description": "ISO timestamp of the latest external cost synchronization" },
         "updatedAt": { "type": "string" }
       },
       "required": ["id", "name", "category", "cost", "currentPrice"]

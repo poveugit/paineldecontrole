@@ -13,7 +13,14 @@ import {
 } from 'firebase/firestore';
 import { getAuth, signInAnonymously, onAuthStateChanged, User, Auth } from 'firebase/auth';
 import defaultFirebaseConfig from '../../firebase-applet-config.json';
-import { ProductItem, ChannelFee, FixedExpenses, CompetitorItem } from '../types/pricing';
+import {
+  ProductItem,
+  ChannelFee,
+  FixedExpenses,
+  CompetitorItem,
+  ExternalSyncConfig,
+  ExternalSyncRunLog,
+} from '../types/pricing';
 
 // Configuration supporting both runtime Vercel environment variables and local json file
 export const firebaseConfig = {
@@ -182,17 +189,23 @@ export const dbDeleteProduct = async (productId: string): Promise<void> => {
   }
 };
 
-// Batch seed or overwrite products
+// Batch seed or overwrite products (chunked at 400 ops to respect Firestore 500-write batch limit)
 export const dbSaveProductsBatch = async (products: ProductItem[]): Promise<void> => {
+  if (!products || products.length === 0) return;
   try {
     await initAuth();
-    const batch = writeBatch(db);
-    for (const prod of products) {
-      const docRef = doc(db, 'products', prod.id);
-      const cleanData = JSON.parse(JSON.stringify(prod));
-      batch.set(docRef, { ...cleanData, updatedAt: new Date().toISOString() }, { merge: true });
+    const CHUNK_SIZE = 400;
+    const nowIso = new Date().toISOString();
+    for (let i = 0; i < products.length; i += CHUNK_SIZE) {
+      const slice = products.slice(i, i + CHUNK_SIZE);
+      const batch = writeBatch(db);
+      for (const prod of slice) {
+        const docRef = doc(db, 'products', prod.id);
+        const cleanData = JSON.parse(JSON.stringify(prod));
+        batch.set(docRef, { ...cleanData, updatedAt: nowIso }, { merge: true });
+      }
+      await batch.commit();
     }
-    await batch.commit();
   } catch (err) {
     console.error('[Firestore] Error batch saving products:', err);
     throw err;
@@ -306,6 +319,104 @@ export const dbSubscribeCustomCategories = (
     (err) => {
       console.warn('[Firestore] Custom categories subscription error:', err);
       onError?.(err);
+    }
+  );
+};
+
+// Save External Sync Configuration
+export const dbSaveSyncConfig = async (config: ExternalSyncConfig): Promise<void> => {
+  const path = 'settings/external_sync_config';
+  try {
+    await initAuth();
+    const docRef = doc(db, 'settings', 'external_sync_config');
+    const cleanData = JSON.parse(JSON.stringify(config));
+    await setDoc(
+      docRef,
+      {
+        id: 'external_sync_config',
+        type: 'external_sync_config',
+        data: cleanData,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+};
+
+// Subscribe to External Sync Configuration
+export const dbSubscribeSyncConfig = (
+  onData: (config: ExternalSyncConfig) => void,
+  onError?: (err: Error) => void
+) => {
+  const path = 'settings/external_sync_config';
+  const docRef = doc(db, 'settings', 'external_sync_config');
+  return onSnapshot(
+    docRef,
+    (snapshot) => {
+      if (snapshot.exists()) {
+        const docData = snapshot.data() as { data?: ExternalSyncConfig };
+        if (docData?.data && typeof docData.data === 'object') {
+          onData(docData.data);
+        }
+      }
+    },
+    (err) => {
+      console.warn('[Firestore] Sync config subscription error:', err);
+      onError?.(err);
+      if (err?.message?.toLowerCase().includes('permission')) {
+        handleFirestoreError(err, OperationType.GET, path);
+      }
+    }
+  );
+};
+
+// Save External Sync Run History (keeps latest 40 runs)
+export const dbSaveSyncHistory = async (runs: ExternalSyncRunLog[]): Promise<void> => {
+  const path = 'settings/external_sync_history';
+  try {
+    await initAuth();
+    const docRef = doc(db, 'settings', 'external_sync_history');
+    const cleanRuns = JSON.parse(JSON.stringify(runs.slice(0, 40)));
+    await setDoc(
+      docRef,
+      {
+        id: 'external_sync_history',
+        type: 'external_sync_history',
+        runs: cleanRuns,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+};
+
+// Subscribe to External Sync Run History
+export const dbSubscribeSyncHistory = (
+  onData: (runs: ExternalSyncRunLog[]) => void,
+  onError?: (err: Error) => void
+) => {
+  const path = 'settings/external_sync_history';
+  const docRef = doc(db, 'settings', 'external_sync_history');
+  return onSnapshot(
+    docRef,
+    (snapshot) => {
+      if (snapshot.exists()) {
+        const docData = snapshot.data() as { runs?: ExternalSyncRunLog[] };
+        if (Array.isArray(docData?.runs)) {
+          onData(docData.runs);
+        }
+      }
+    },
+    (err) => {
+      console.warn('[Firestore] Sync history subscription error:', err);
+      onError?.(err);
+      if (err?.message?.toLowerCase().includes('permission')) {
+        handleFirestoreError(err, OperationType.GET, path);
+      }
     }
   );
 };

@@ -797,6 +797,21 @@ export function normalizeProduct(product: ProductItem): ProductItem {
     ...(typeof product.referenceChannelId === 'string' && product.referenceChannelId
       ? { referenceChannelId: product.referenceChannelId }
       : {}),
+    ...(typeof product.externalSource === 'string' && product.externalSource
+      ? { externalSource: product.externalSource }
+      : {}),
+    ...(typeof product.externalId === 'string' && product.externalId
+      ? { externalId: product.externalId }
+      : {}),
+    ...(typeof product.externalUrl === 'string' && product.externalUrl
+      ? { externalUrl: product.externalUrl }
+      : {}),
+    ...(typeof product.previousCost === 'number' && !isNaN(product.previousCost)
+      ? { previousCost: product.previousCost }
+      : {}),
+    ...(typeof product.lastCostSyncAt === 'string' && product.lastCostSyncAt
+      ? { lastCostSyncAt: product.lastCostSyncAt }
+      : {}),
   };
 }
 

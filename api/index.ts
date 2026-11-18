@@ -1,6 +1,20 @@
+import fs from 'fs';
+import path from 'path';
 import express from 'express';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
+import {
+  ChannelFee,
+  ExternalSyncConfig,
+  ExternalSyncRunLog,
+  ProductItem,
+} from '../src/types/pricing';
+import {
+  createDefaultSyncConfig,
+  parseExternalCatalogPayload,
+  reconcileExternalCatalog,
+} from '../src/utils/syncEngine';
+import { INITIAL_CHANNELS, normalizeProduct } from '../src/utils/pricingEngine';
 
 dotenv.config();
 
@@ -557,6 +571,394 @@ function generateFallbackReport(products: any[], channels: any[]) {
     ]
   };
 }
+
+// ================= EXTERNAL SUPPLIER SYNC API (SUPERLUNA & WEBHOOKS) =================
+
+function loadFirebaseServerConfig() {
+  let fileCfg: Record<string, string> = {};
+  try {
+    const cfgPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+    if (fs.existsSync(cfgPath)) {
+      fileCfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    }
+  } catch {
+    // Fallback to environment variables
+  }
+  return {
+    projectId: process.env.VITE_FIREBASE_PROJECT_ID || fileCfg.projectId || '',
+    databaseId: process.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || fileCfg.firestoreDatabaseId || '(default)',
+    apiKey: process.env.VITE_FIREBASE_API_KEY || fileCfg.apiKey || '',
+  };
+}
+
+type FsValue =
+  | { nullValue: null }
+  | { booleanValue: boolean }
+  | { integerValue: string }
+  | { doubleValue: number }
+  | { stringValue: string }
+  | { arrayValue: { values?: FsValue[] } }
+  | { mapValue: { fields?: Record<string, FsValue> } };
+
+function toFirestoreValue(val: unknown): FsValue {
+  if (val === null || val === undefined) return { nullValue: null };
+  if (typeof val === 'boolean') return { booleanValue: val };
+  if (typeof val === 'number') {
+    if (!isFinite(val)) return { doubleValue: 0 };
+    if (Number.isInteger(val)) return { integerValue: String(val) };
+    return { doubleValue: val };
+  }
+  if (typeof val === 'string') return { stringValue: val };
+  if (Array.isArray(val)) {
+    return { arrayValue: { values: val.map((item) => toFirestoreValue(item)) } };
+  }
+  if (typeof val === 'object') {
+    const fields: Record<string, FsValue> = {};
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      if (v !== undefined) {
+        fields[k] = toFirestoreValue(v);
+      }
+    }
+    return { mapValue: { fields } };
+  }
+  return { stringValue: String(val) };
+}
+
+function fromFirestoreValue(val: FsValue | undefined): unknown {
+  if (!val || typeof val !== 'object') return undefined;
+  if ('nullValue' in val) return null;
+  if ('booleanValue' in val) return val.booleanValue;
+  if ('integerValue' in val) return Number(val.integerValue);
+  if ('doubleValue' in val) return Number(val.doubleValue);
+  if ('stringValue' in val) return val.stringValue;
+  if ('arrayValue' in val) {
+    return (val.arrayValue?.values || []).map((v) => fromFirestoreValue(v));
+  }
+  if ('mapValue' in val) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val.mapValue?.fields || {})) {
+      out[k] = fromFirestoreValue(v);
+    }
+    return out;
+  }
+  return undefined;
+}
+
+function fromFirestoreDocument(docJson: any): Record<string, unknown> | null {
+  if (!docJson || !docJson.fields) return null;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(docJson.fields)) {
+    out[k] = fromFirestoreValue(v as FsValue);
+  }
+  if (typeof docJson.name === 'string') {
+    const parts = docJson.name.split('/');
+    if (!out.id) out.id = parts[parts.length - 1];
+  }
+  return out;
+}
+
+function getFirestoreBaseUrl() {
+  const { projectId, databaseId, apiKey } = loadFirebaseServerConfig();
+  if (!projectId || !apiKey) {
+    throw new Error('Configuração do Firebase ausente para sincronização no servidor.');
+  }
+  const dbName = databaseId || '(default)';
+  return {
+    baseUrl: `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(dbName)}/documents`,
+    docPrefix: `projects/${projectId}/databases/${dbName}/documents`,
+    apiKey,
+  };
+}
+
+async function fsGetDoc(docPath: string): Promise<Record<string, unknown> | null> {
+  const { baseUrl, apiKey } = getFirestoreBaseUrl();
+  const res = await fetch(`${baseUrl}/${docPath}?key=${encodeURIComponent(apiKey)}`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Erro ao ler Firestore (${res.status}): ${text.slice(0, 200)}`);
+  }
+  const json = await res.json();
+  return fromFirestoreDocument(json);
+}
+
+async function fsListCollection(colPath: string): Promise<Record<string, unknown>[]> {
+  const { baseUrl, apiKey } = getFirestoreBaseUrl();
+  const items: Record<string, unknown>[] = [];
+  let pageToken = '';
+
+  do {
+    const qs = new URLSearchParams({ pageSize: '300', key: apiKey });
+    if (pageToken) qs.set('pageToken', pageToken);
+    const res = await fetch(`${baseUrl}/${colPath}?${qs.toString()}`);
+    if (res.status === 404) break;
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Erro ao listar ${colPath} (${res.status}): ${text.slice(0, 200)}`);
+    }
+    const json = await res.json();
+    if (Array.isArray(json.documents)) {
+      for (const docItem of json.documents) {
+        const parsed = fromFirestoreDocument(docItem);
+        if (parsed) items.push(parsed);
+      }
+    }
+    pageToken = json.nextPageToken || '';
+  } while (pageToken);
+
+  return items;
+}
+
+async function fsCommitWrites(writes: Array<{ docPath: string; data: Record<string, unknown> }>) {
+  if (writes.length === 0) return;
+  const { projectId, databaseId, apiKey } = loadFirebaseServerConfig();
+  const dbName = databaseId || '(default)';
+  const docPrefix = `projects/${projectId}/databases/${dbName}/documents`;
+  const commitUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(dbName)}/documents:commit?key=${encodeURIComponent(apiKey)}`;
+
+  const CHUNK_SIZE = 350;
+  for (let i = 0; i < writes.length; i += CHUNK_SIZE) {
+    const slice = writes.slice(i, i + CHUNK_SIZE);
+    const body = {
+      writes: slice.map((w) => {
+        const fields: Record<string, FsValue> = {};
+        for (const [k, v] of Object.entries(w.data)) {
+          if (v !== undefined) fields[k] = toFirestoreValue(v);
+        }
+        return {
+          update: {
+            name: `${docPrefix}/${w.docPath}`,
+            fields,
+          },
+        };
+      }),
+    };
+
+    const res = await fetch(commitUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Erro ao gravar lote no Firestore (${res.status}): ${text.slice(0, 240)}`);
+    }
+  }
+}
+
+// Enable CORS for /api/sync/* so browser extractors or external workers can push updates
+app.use('/api/sync', (req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-sync-token');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
+function extractSyncToken(req: express.Request): string {
+  const headerToken = req.header('x-sync-token');
+  if (headerToken) return headerToken.trim();
+  const authHeader = req.header('authorization') || '';
+  if (authHeader.toLowerCase().startsWith('bearer ')) {
+    return authHeader.slice(7).trim();
+  }
+  if (typeof req.body?.token === 'string') return req.body.token.trim();
+  return '';
+}
+
+app.get('/api/sync/status', async (req, res) => {
+  try {
+    const configDoc = await fsGetDoc('settings/external_sync_config');
+    const historyDoc = await fsGetDoc('settings/external_sync_history');
+    const config = (configDoc?.data as ExternalSyncConfig | undefined) || null;
+    const history = Array.isArray(historyDoc?.runs) ? (historyDoc.runs as ExternalSyncRunLog[]) : [];
+
+    return res.json({
+      success: true,
+      configured: Boolean(config?.apiToken),
+      enabled: config?.enabled ?? false,
+      sourceName: config?.sourceName || 'SuperLuna Supermercados',
+      sourceUrl: config?.sourceUrl || 'https://www.superlunasupermercados.com.br/',
+      lastRun: history[0] || null,
+      historyCount: history.length,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Erro ao consultar status da sincronização.',
+    });
+  }
+});
+
+app.post('/api/sync/config', async (req, res) => {
+  try {
+    const incoming = req.body?.config as ExternalSyncConfig | undefined;
+    if (!incoming || !incoming.apiToken) {
+      return res.status(400).json({ success: false, error: 'Configuração ou token de sincronização inválido.' });
+    }
+    const cleanConfig: ExternalSyncConfig = {
+      ...createDefaultSyncConfig(),
+      ...incoming,
+      id: 'external_sync_config',
+      updatedAt: new Date().toISOString(),
+    };
+    await fsCommitWrites([
+      {
+        docPath: 'settings/external_sync_config',
+        data: {
+          id: 'external_sync_config',
+          type: 'external_sync_config',
+          data: cleanConfig,
+          updatedAt: cleanConfig.updatedAt,
+        },
+      },
+    ]);
+    return res.json({ success: true, config: cleanConfig });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Erro ao salvar configuração de sincronização.',
+    });
+  }
+});
+
+app.post('/api/sync/preview', async (req, res) => {
+  try {
+    const rawPayload = req.body?.products ?? req.body?.rawText ?? req.body;
+    const items = parseExternalCatalogPayload(rawPayload);
+    if (items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Nenhum produto válido encontrado no payload enviado.',
+      });
+    }
+
+    const [prodDocs, channelDocs, configDoc] = await Promise.all([
+      fsListCollection('products'),
+      fsListCollection('channels'),
+      fsGetDoc('settings/external_sync_config'),
+    ]);
+
+    const existingProducts = prodDocs.map((d) => normalizeProduct(d as unknown as ProductItem));
+    const channels = channelDocs.length > 0 ? (channelDocs as unknown as ChannelFee[]) : INITIAL_CHANNELS;
+    const config =
+      (req.body?.config as ExternalSyncConfig | undefined) ||
+      (configDoc?.data as ExternalSyncConfig | undefined) ||
+      createDefaultSyncConfig(channels[0]?.id || 'direct-zero');
+
+    const result = reconcileExternalCatalog(existingProducts, items, channels, config, 'manual_import');
+    return res.json({
+      success: true,
+      dryRun: true,
+      run: result.runLog,
+      diffItems: result.diffItems,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Erro ao simular diferenças do catálogo.',
+    });
+  }
+});
+
+app.post('/api/sync/catalog', async (req, res) => {
+  try {
+    const configDoc = await fsGetDoc('settings/external_sync_config');
+    const savedConfig = (configDoc?.data as ExternalSyncConfig | undefined) || null;
+    const token = extractSyncToken(req);
+
+    if (!savedConfig || !savedConfig.apiToken) {
+      return res.status(401).json({
+        success: false,
+        error: 'Sincronização ainda não inicializada no painel. Abra "Sincronização API" e salve as regras primeiro.',
+      });
+    }
+
+    if (!token || token !== savedConfig.apiToken) {
+      return res.status(401).json({
+        success: false,
+        error: 'Token de sincronização inválido ou ausente (envie no cabeçalho x-sync-token).',
+      });
+    }
+
+    if (!savedConfig.enabled) {
+      return res.status(403).json({
+        success: false,
+        error: 'Recebimento automático via API está pausado nas configurações do painel.',
+      });
+    }
+
+    const rawPayload = req.body?.products ?? req.body?.rawText ?? req.body;
+    const items = parseExternalCatalogPayload(rawPayload);
+    if (items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Nenhum produto com nome e preço válidos encontrado no payload.',
+      });
+    }
+
+    const trigger =
+      req.body?.trigger === 'browser_script' || req.body?.trigger === 'manual_import'
+        ? req.body.trigger
+        : 'api_webhook';
+
+    const [prodDocs, channelDocs, historyDoc] = await Promise.all([
+      fsListCollection('products'),
+      fsListCollection('channels'),
+      fsGetDoc('settings/external_sync_history'),
+    ]);
+
+    const existingProducts = prodDocs.map((d) => normalizeProduct(d as unknown as ProductItem));
+    const channels = channelDocs.length > 0 ? (channelDocs as unknown as ChannelFee[]) : INITIAL_CHANNELS;
+    const previousHistory = Array.isArray(historyDoc?.runs)
+      ? (historyDoc.runs as ExternalSyncRunLog[])
+      : [];
+
+    const { productsToSave, runLog } = reconcileExternalCatalog(
+      existingProducts,
+      items,
+      channels,
+      savedConfig,
+      trigger
+    );
+
+    const nowIso = new Date().toISOString();
+    const writes: Array<{ docPath: string; data: Record<string, unknown> }> = productsToSave.map((prod) => ({
+      docPath: `products/${prod.id}`,
+      data: {
+        ...(JSON.parse(JSON.stringify(prod)) as Record<string, unknown>),
+        updatedAt: nowIso,
+      },
+    }));
+
+    const nextHistory = [runLog, ...previousHistory].slice(0, 40);
+    writes.push({
+      docPath: 'settings/external_sync_history',
+      data: {
+        id: 'external_sync_history',
+        type: 'external_sync_history',
+        runs: JSON.parse(JSON.stringify(nextHistory)),
+        updatedAt: nowIso,
+      },
+    });
+
+    await fsCommitWrites(writes);
+
+    return res.json({
+      success: true,
+      run: runLog,
+      savedCount: productsToSave.length,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Erro interno ao processar sincronização de catálogo.',
+    });
+  }
+});
 
 // Catch-all 404 for unmatched /api routes
 app.all('/api/*', (req, res) => {

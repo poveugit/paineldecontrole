@@ -54,8 +54,8 @@ interface HeaderProps {
   onRequestPushPermission: () => void;
   layoutGridMode?: boolean;
   onToggleLayoutGridMode?: () => void;
-  activeScreen?: 'dashboard' | 'catalog-studio' | 'fees';
-  onSelectScreen?: (screen: 'dashboard' | 'catalog-studio' | 'fees') => void;
+  activeScreen?: 'dashboard' | 'catalog-studio' | 'fees' | 'sync';
+  onSelectScreen?: (screen: 'dashboard' | 'catalog-studio' | 'fees' | 'sync') => void;
   totalProductsCount?: number;
   totalChannelsCount?: number;
   onOpenQuickNav?: () => void;
@@ -301,6 +301,27 @@ export const Header: React.FC<HeaderProps> = ({
                   {totalChannelsCount}
                 </span>
               )}
+            </button>
+
+            {/* Tab 4: Sincronização Automática & API */}
+            <button
+              onClick={() => onSelectScreen?.('sync')}
+              className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all whitespace-nowrap ${
+                activeScreen === 'sync'
+                  ? 'bg-cyan-600 text-white shadow-sm font-bold ring-1 ring-cyan-400/50'
+                  : 'text-cyan-300 hover:text-cyan-200 hover:bg-cyan-500/10'
+              }`}
+              title="Abrir Tela de Sincronização Automática & API de Fornecedor"
+            >
+              {activeScreen === 'sync' && (
+                <motion.div
+                  layoutId="master-active-screen-indicator"
+                  className="absolute inset-0 rounded-lg bg-cyan-600 ring-1 ring-cyan-400/50 shadow-sm"
+                  transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                />
+              )}
+              <Database className={`w-3.5 h-3.5 relative z-10 ${activeScreen === 'sync' ? 'text-white' : 'text-cyan-400'}`} />
+              <span className="relative z-10">Sincronização API</span>
             </button>
           </nav>
 
@@ -613,17 +634,23 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </div>
       ) : (
-        /* Sub-bar when on Catalog Studio or Fees Screen */
+        /* Sub-bar when on Catalog Studio, Fees or External Sync Screen */
         <div className="w-full px-3 sm:px-5 lg:px-6 xl:px-8 py-1.5 border-t border-slate-800/80 bg-slate-950/95 flex items-center justify-between text-xs shadow-inner">
           <div className="flex items-center gap-2 text-slate-400 font-medium truncate">
             <span className="text-slate-300 font-bold">
-              {activeScreen === 'catalog-studio' ? 'Estúdio de Fichas Técnicas & CMV' : 'Gestão Centralizada de Taxas & Canais'}
+              {activeScreen === 'catalog-studio'
+                ? 'Estúdio de Fichas Técnicas & CMV'
+                : activeScreen === 'fees'
+                ? 'Gestão Centralizada de Taxas & Canais'
+                : 'API de Sincronização Automática (Revenda)'}
             </span>
             <span className="text-slate-600">•</span>
             <span className="hidden sm:inline text-slate-400 text-[11px]">
               {activeScreen === 'catalog-studio'
                 ? `${totalProductsCount} produtos cadastrados com cálculo em tempo real de margens e CMV.`
-                : `${totalChannelsCount} modalidades de comissões e repasses de delivery e maquininhas.`}
+                : activeScreen === 'fees'
+                ? `${totalChannelsCount} modalidades de comissões e repasses de delivery e maquininhas.`
+                : 'Recebimento via Webhook, Extrator Chrome e Robô Playwright com recálculo blindado de revenda.'}
             </span>
           </div>
 

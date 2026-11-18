@@ -47,6 +47,7 @@ import { ConsolidatedProfitabilityWidget } from './components/ConsolidatedProfit
 import { QuickNavDrawer } from './components/QuickNavDrawer';
 import { WidgetFocusModal } from './components/WidgetFocusModal';
 import { DatabaseStatusModal } from './components/DatabaseStatusModal';
+import { ExternalSyncScreen } from './components/ExternalSyncScreen';
 import {
   testFirestoreConnection,
   dbSeedIfEmpty,
@@ -60,7 +61,12 @@ import {
   dbDeleteCompetitor,
   dbSaveCustomCategories,
   dbSubscribeCustomCategories,
+  dbSaveSyncConfig,
+  dbSubscribeSyncConfig,
+  dbSaveSyncHistory,
+  dbSubscribeSyncHistory,
 } from './lib/firebase';
+import { createDefaultSyncConfig } from './utils/syncEngine';
 import firebaseConfig from '../firebase-applet-config.json';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -92,6 +98,8 @@ import {
   DepartmentKey,
   PricingAuditResult,
   AlertTriggerConfig,
+  ExternalSyncConfig,
+  ExternalSyncRunLog,
 } from './types/pricing';
 
 export default function App() {
@@ -283,11 +291,36 @@ export default function App() {
     return [];
   });
 
+  const [syncConfig, setSyncConfig] = useState<ExternalSyncConfig>(() => {
+    const saved = localStorage.getItem('omniprice_external_sync_config');
+    if (saved) {
+      try {
+        return { ...createDefaultSyncConfig(), ...JSON.parse(saved) };
+      } catch {
+        return createDefaultSyncConfig();
+      }
+    }
+    return createDefaultSyncConfig();
+  });
+
+  const [syncHistory, setSyncHistory] = useState<ExternalSyncRunLog[]>(() => {
+    const saved = localStorage.getItem('omniprice_external_sync_history');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  });
+
   const [currentUser, setCurrentUser] = useState<UserProfile>(USERS[0]); // Admin by default
   const [selectedDepartment, setSelectedDepartment] = useState<DepartmentKey>('all');
 
-  // Screen level navigation: 'dashboard' vs 'catalog-studio' vs 'fees' (Independent screen, zero floating cards!)
-  const [activeScreen, setActiveScreen] = useState<'dashboard' | 'catalog-studio' | 'fees'>('dashboard');
+  // Screen level navigation: 'dashboard' vs 'catalog-studio' vs 'fees' vs 'sync' (Independent screen, zero floating cards!)
+  const [activeScreen, setActiveScreen] = useState<'dashboard' | 'catalog-studio' | 'fees' | 'sync'>('dashboard');
   const [catalogInitialEditProductId, setCatalogInitialEditProductId] = useState<string | null>(null);
 
   const [widgets, setWidgets] = useState<WidgetItem[]>(() => {
@@ -373,6 +406,9 @@ export default function App() {
   useEffect(() => {
     let unsubscribeProducts: (() => void) | undefined;
     let unsubscribeCategories: (() => void) | undefined;
+    let unsubscribeSyncConfig: (() => void) | undefined;
+    let unsubscribeSyncHistory: (() => void) | undefined;
+    let latestKnownRunId: string | null = syncHistory[0]?.id || null;
 
     const setupDatabase = async () => {
       try {
@@ -404,6 +440,36 @@ export default function App() {
               return merged;
             });
           });
+
+          // Real-time listener for external sync configuration
+          unsubscribeSyncConfig = dbSubscribeSyncConfig((remoteCfg) => {
+            setSyncConfig((prev) => ({ ...prev, ...remoteCfg }));
+          });
+
+          // Real-time listener for external sync runs (alerts user when webhook updates prices)
+          unsubscribeSyncHistory = dbSubscribeSyncHistory((remoteRuns) => {
+            setSyncHistory(remoteRuns);
+            const newest = remoteRuns[0];
+            if (newest && newest.id !== latestKnownRunId) {
+              const isNewWebhookRun = latestKnownRunId !== null && newest.trigger === 'api_webhook';
+              latestKnownRunId = newest.id;
+              if (isNewWebhookRun && (newest.createdCount > 0 || newest.updatedCount > 0)) {
+                setNotifications((prev) => [
+                  {
+                    id: 'notif-' + Date.now(),
+                    title: `Sincronização API (${newest.sourceLabel})`,
+                    message: `${newest.createdCount} novos produtos e ${newest.updatedCount} atualizações de custo (${newest.priceIncreases} ↑ / ${newest.priceDecreases} ↓).`,
+                    type: newest.priceIncreases > 0 ? 'warning' : 'success',
+                    timestamp: 'Agora',
+                    read: false,
+                    source: 'market',
+                  },
+                  ...prev,
+                ]);
+              }
+            }
+          });
+
           // One-time cleanup of legacy sample competitors in Firestore
           if (!localStorage.getItem('omniprice_firestore_sample_competitors_purged_v1')) {
             Promise.all([
@@ -426,6 +492,8 @@ export default function App() {
     return () => {
       if (unsubscribeProducts) unsubscribeProducts();
       if (unsubscribeCategories) unsubscribeCategories();
+      if (unsubscribeSyncConfig) unsubscribeSyncConfig();
+      if (unsubscribeSyncHistory) unsubscribeSyncHistory();
     };
   }, []);
 
@@ -473,6 +541,14 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('omniprice_product_focus_scope', productFocusScope);
   }, [productFocusScope]);
+
+  useEffect(() => {
+    localStorage.setItem('omniprice_external_sync_config', JSON.stringify(syncConfig));
+  }, [syncConfig]);
+
+  useEffect(() => {
+    localStorage.setItem('omniprice_external_sync_history', JSON.stringify(syncHistory));
+  }, [syncHistory]);
 
   // Initial AI Audit on load
   useEffect(() => {
@@ -802,6 +878,46 @@ export default function App() {
         title: 'Planilha Importada',
         message: `${importedProducts.length} itens foram processados e sincronizados no catálogo via planilha.`,
         type: 'success',
+        timestamp: 'Agora',
+        read: false,
+        source: 'market',
+      },
+      ...prev,
+    ]);
+  };
+
+  // External Supplier API Sync Handlers
+  const handleSaveSyncConfig = async (nextConfig: ExternalSyncConfig) => {
+    const stamped: ExternalSyncConfig = {
+      ...nextConfig,
+      updatedAt: new Date().toISOString(),
+    };
+    setSyncConfig(stamped);
+    await dbSaveSyncConfig(stamped);
+    setLastSyncTime(new Date());
+  };
+
+  const handleApplySyncBatch = async (
+    updatedProducts: ProductItem[],
+    productsToSave: ProductItem[],
+    runLog: ExternalSyncRunLog
+  ) => {
+    setProducts(updatedProducts);
+    const nextHistory = [runLog, ...syncHistory].slice(0, 40);
+    setSyncHistory(nextHistory);
+
+    if (productsToSave.length > 0) {
+      await dbSaveProductsBatch(productsToSave);
+    }
+    await dbSaveSyncHistory(nextHistory);
+    setLastSyncTime(new Date());
+
+    setNotifications((prev) => [
+      {
+        id: 'notif-' + Date.now(),
+        title: `Sincronização ${runLog.sourceLabel}`,
+        message: `${runLog.createdCount} novos produtos cadastrados e ${runLog.updatedCount} custos atualizados (${runLog.priceIncreases} ↑ / ${runLog.priceDecreases} ↓).`,
+        type: runLog.priceIncreases > 0 ? 'warning' : 'success',
         timestamp: 'Agora',
         read: false,
         source: 'market',
@@ -1196,6 +1312,31 @@ export default function App() {
                 onSaveChannels={handleSaveChannels}
                 currentUser={currentUser}
                 products={products}
+                onBackToDashboard={() => {
+                  setActiveScreen('dashboard');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+              />
+            </motion.div>
+          ) : activeScreen === 'sync' ? (
+            <motion.div
+              key="external-sync"
+              initial={{ opacity: 0, y: 15, scale: 0.995 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -10, scale: 0.995 }}
+              transition={{ type: 'spring', stiffness: 350, damping: 28 }}
+            >
+              <ExternalSyncScreen
+                products={products}
+                channels={channels}
+                syncConfig={syncConfig}
+                syncHistory={syncHistory}
+                onSaveSyncConfig={handleSaveSyncConfig}
+                onApplySyncBatch={handleApplySyncBatch}
+                onOpenCatalogStudio={() => {
+                  setActiveScreen('catalog-studio');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
                 onBackToDashboard={() => {
                   setActiveScreen('dashboard');
                   window.scrollTo({ top: 0, behavior: 'smooth' });
